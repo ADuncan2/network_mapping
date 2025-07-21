@@ -5,11 +5,16 @@ from gridstock.dbcleaning import (
 )
 from gridstock.plotting import plot_net_data
 from gridstock.recorder import NetworkData
-#import matplotlib.pyplot as plt
 
-reset_station_flux_lines_table()
+from multiprocessing import Pool, Queue, Process, cpu_count, Event
+from tqdm import tqdm
+import os
+from queue import Empty
 
-print("database reset")
+
+#reset_station_flux_lines_table()
+
+# print("database reset")
 
 def extract_all_fids(gpkg_file='data/assets.gpkg', layer_name='General Boundary'):
     """
@@ -39,32 +44,64 @@ def extract_all_fids(gpkg_file='data/assets.gpkg', layer_name='General Boundary'
 # all_fids_list = [item for item in all_fids_list_raw if item not in problem_subs]
 
 
-mapped_subs = get_mapped_substations_data()
-
-print(f"substations mapped: {len(mapped_subs)}")
-
-all_fids_list = [11374885]
-
-for fid in all_fids_list:
-    print(f"Current substation: {fid}")
-    perc_prog = round(all_fids_list.index(fid) * 100 / len(all_fids_list),2)
-    print(f"Percentage progress: {perc_prog}%")
-
-    print("Starting mapping...")
-
-    is_fid_present = any(fid == row[0] for row in mapped_subs)
-
-    if is_fid_present:
-        print(f"fid {fid} is already in mapped_substations.")
-    else:
-        try:
-            print("trying")
-            nd = map_substation(fid, max_recursion_depth=20000)
-            print("mapped")
-            nd.to_sql()
-            print("saved")
-        except Exception as e:
-            print(f"An error occurred: {e}")
 
 
-print("finishes the script")
+
+def map_script(fid):
+    pid = os.getpid()
+    flux_db_path = f"./data/temp/flux_lines_{pid}.sqlite"
+    
+    # Perform the mapping
+    try:
+        netdata = map_substation(fid, flux_db_path)
+        return netdata
+    except Exception as e:
+        print(f"Error in worker {pid} for fid {fid}: {e}")
+        return None  # or return (fid, str(e)) if you want to track errors
+
+
+def main():
+    mapped_subs = get_mapped_substations_data()
+
+    print(f"substations mapped: {len(mapped_subs)}")
+
+    fids = [11374879, 11374881, 11374883, 11374885, 11374888, 11374889]
+
+    with Pool(processes=cpu_count()-4) as pool:
+        for netdata in tqdm(pool.imap_unordered(map_script, fids), total=len(fids)):
+            if netdata is not None:
+                try:
+                    netdata.to_sql()
+                except Exception as e:
+                    print(f"[!] Error saving netdata: {e}")
+
+
+if __name__ == '__main__':
+    print("Starting mapping:")
+    main()
+    print("finishes the script")
+
+
+
+# for fid in all_fids_list:
+#     # print(f"Current substation: {fid}")
+#     # perc_prog = round(all_fids_list.index(fid) * 100 / len(all_fids_list),2)
+#     # print(f"Percentage progress: {perc_prog}%")
+
+#     print("Starting mapping...")
+
+#     is_fid_present = any(fid == row[0] for row in mapped_subs)
+
+#     if is_fid_present:
+#         print(f"fid {fid} is already in mapped_substations.")
+#     else:
+#         try:
+#             print("trying")
+#             nd = map_substation(fid, max_recursion_depth=20000)
+#             print("mapped")
+#             nd.to_sql()
+#             print("saved")
+#         except Exception as e:
+#             print(f"An error occurred: {e}")
+
+

@@ -20,7 +20,9 @@ from shapely.wkt import loads
 from matplotlib.colors import ListedColormap
 import numpy as np
 from itertools import combinations
-
+from gridstock.dbcleaning import (
+    reset_station_flux_lines_table,
+    create_station_flux_lines_table)
 
 def interpolate_coordinates(coordinates, num_new_points):
     new_coordinates = []
@@ -684,6 +686,7 @@ def flux_way_check(fid, cursor):
 
 def map_substation(
         substation_fid: int,
+        flux_db_path: str,
         max_recursion_depth: int = 2000
         ) -> NetworkData:
 
@@ -711,7 +714,13 @@ def map_substation(
     # Set up database connections
     conn_lv_assets = sqlite3.connect('data/lv_assets.sqlite')
     cursor_lv_assets = conn_lv_assets.cursor()
-    connection_flux = sqlite3.connect('data/flux_lines.sqlite')
+    # Checks if a database already exists for this path. If it doesn't it creates one, if it does it resets it
+    
+    if not os.path.exists(flux_db_path):
+        create_station_flux_lines_table(flux_db_path)
+    if os.path.exists(flux_db_path):
+        reset_station_flux_lines_table(flux_db_path)
+    connection_flux = sqlite3.connect(flux_db_path)
     cursor_flux = connection_flux.cursor()
     connection_graph = sqlite3.connect('data/graph.sqlite')
     cursor_graph = connection_graph.cursor()
@@ -778,62 +787,6 @@ def map_substation(
     return net_data
 
 
-def map_switch(
-        switch_fid: int,
-        max_recursion_depth: int = 20000
-        ) -> NetworkData:
-    connection_net = sqlite3.connect('data/network_data.sqlite')
-    cursor_net = connection_net.cursor()
-
-    # Find all edge connected to it
-    cursor_net.execute(
-            f"""
-            SELECT fid_to, fid_from FROM conn_comp WHERE fid_from = {switch_fid} OR fid_to = {switch_fid}
-            """
-            )
-    rows = cursor_net.fetchall()
-    incident_edges = [
-        (x[0] if x[1] == switch_fid else x[1]) for x in rows
-    ]
-
-
-
-
-    # Populate the network recorder with this data
-    net_data = NetworkData()
-    net_data.counter = 0
-    net_data.visited_nodes.append(switch_fid)
-    
-
-    # Set up database connections
-    conn_lv_assets = sqlite3.connect('data/lv_assets.sqlite')
-    cursor_lv_assets = conn_lv_assets.cursor()
-    connection_flux = sqlite3.connect('data/flux_lines.sqlite')
-    cursor_flux = connection_flux.cursor()
-    connection_graph = sqlite3.connect('data/graph.sqlite')
-    cursor_graph = connection_graph.cursor()
-
-
-
-    print(f"Starting depth first search on substation {switch_fid}")
-    for e in incident_edges:
-        print(e)
-        DFS(net_data, e, cursor_net, cursor_lv_assets,
-            cursor_flux, cursor_graph, connection_flux, 0, 
-            max_recursion_depth=max_recursion_depth)
-        
-    net_data.switch = switch_fid
-        
-    # Close down all database connections
-    cursor_lv_assets.close()
-    conn_lv_assets.close()
-    cursor_flux.close()
-    cursor_graph.close()
-    connection_flux.close()
-    cursor_net.close()
-    connection_net.close()
-
-    return net_data
 
 
 def get_background_map_and_bounds(

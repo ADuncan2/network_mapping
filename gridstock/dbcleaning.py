@@ -176,7 +176,7 @@ def create_lv_db() -> None:
     connection.close()
 
     
-def create_station_flux_lines_table() -> None:
+def create_station_flux_lines_table(flux_db_path) -> None:
     """
     Function that creates an empty database 
     that will be used to contain the
@@ -185,7 +185,8 @@ def create_station_flux_lines_table() -> None:
     """
 
     # Create the new database
-    file_path = "data/flux_lines.sqlite"
+    file_path = flux_db_path
+    print(f"file path: {file_path}")
     if os.path.exists(file_path):
         os.remove(file_path)
 
@@ -203,13 +204,13 @@ def create_station_flux_lines_table() -> None:
     connection.close() 
 
 
-def reset_station_flux_lines_table() -> None:
+def reset_station_flux_lines_table(flux_db_path) -> None:
     """
     Function to reset the visited status of lines
     incident on substations.
     """
 
-    connection = sqlite3.connect("data/flux_lines.sqlite")
+    connection = sqlite3.connect(flux_db_path)
     cursor = connection.cursor()
     cursor.execute("UPDATE flux_lines SET Visited = 0")
     cursor.close()
