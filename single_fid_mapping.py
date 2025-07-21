@@ -47,61 +47,93 @@ def extract_all_fids(gpkg_file='data/assets.gpkg', layer_name='General Boundary'
 
 
 
-def map_script(fid):
-    pid = os.getpid()
-    flux_db_path = f"./data/temp/flux_lines_{pid}.sqlite"
+# def map_script(fid):
+#     pid = os.getpid()
+#     flux_db_path = f"./data/temp/flux_lines_{pid}.sqlite"
     
-    # Perform the mapping
-    try:
-        netdata = map_substation(fid, flux_db_path)
-        return netdata
-    except Exception as e:
-        print(f"Error in worker {pid} for fid {fid}: {e}")
-        return None  # or return (fid, str(e)) if you want to track errors
+#     # Perform the mapping
+#     try:
+#         netdata = map_substation(fid, flux_db_path)
+#         return netdata
+#     except Exception as e:
+#         print(f"Error in worker {pid} for fid {fid}: {e}")
+#         return None  # or return (fid, str(e)) if you want to track errors
 
+
+# def main():
+#     mapped_subs = get_mapped_substations_data()
+
+#     print(f"substations mapped: {len(mapped_subs)}")
+
+#     fids = [11374879, 11374881, 11374883, 11374885, 11374888, 11374889]
+
+#     fids = [fid for fid in fids if fid not in mapped_subs]
+
+#     with Pool(processes=cpu_count()-4) as pool:
+#         for netdata in tqdm(pool.imap_unordered(map_script, fids), total=len(fids)):
+#             if netdata is not None:
+#                 try:
+#                     netdata.to_sql()
+#                 except Exception as e:
+#                     print(f"[!] Error saving netdata: {e}")
+
+def worker(fid_list, result_queue, index):
+    flux_db_path = os.path.join(".","data", "temp", f"flux_lines_{index}.sqlite")
+    # flux_db_path = f".\data\temp\flux_lines_{index}.sqlite"
+    for fid in fid_list:
+        try:
+            # Clear flux db if needed here
+            netdata = map_substation(fid, str(flux_db_path))
+            result_queue.put(netdata)
+        except Exception as e:
+            print(f"[!] Error on FID {fid}: {e}")
+
+def writer(result_queue):
+    while True:
+        netdata = result_queue.get()
+        if netdata is None:
+            break
+        try:
+            netdata.to_sql()
+        except Exception as e:
+            print(f"[!] Error saving netdata: {e}")
 
 def main():
+
+    all_fids_list_raw = extract_all_fids()
+
+    # removing substations that cause as it causes an infinite loop - investigate! (something in the point overlap point)
+    problem_subs = [11375446, 11375106, 11375790, 11375939, 11376031]
+    all_fids_list = [item for item in all_fids_list_raw if item not in problem_subs]
+    all_fids_list[0:40]
+
+    # Check to see which substations have already been mapped
     mapped_subs = get_mapped_substations_data()
+    fids = [fid for fid in all_fids_list if fid not in mapped_subs]
 
-    print(f"substations mapped: {len(mapped_subs)}")
+    num_of_workers = min(cpu_count() - 1, len(fids))
+    chunk_size = (len(fids) + num_of_workers - 1) // num_of_workers
+    fid_chunks = [fids[i:i+chunk_size] for i in range(0, len(fids), chunk_size)]
 
-    fids = [11374879, 11374881, 11374883, 11374885, 11374888, 11374889]
+    result_queue = Queue()
+    writer_process = Process(target=writer, args=(result_queue,))
+    writer_process.start()
 
-    with Pool(processes=cpu_count()-4) as pool:
-        for netdata in tqdm(pool.imap_unordered(map_script, fids), total=len(fids)):
-            if netdata is not None:
-                try:
-                    netdata.to_sql()
-                except Exception as e:
-                    print(f"[!] Error saving netdata: {e}")
+    workers = []
+    for i, fid_chunk in enumerate(fid_chunks):
+        p = Process(target=worker, args=(fid_chunk, result_queue, i))
+        p.start()
+        workers.append(p)
 
+    for p in tqdm(workers, desc="Mapping processes"):
+        p.join()
+
+    result_queue.put(None)
+    writer_process.join()
 
 if __name__ == '__main__':
     print("Starting mapping:")
     main()
-    print("finishes the script")
-
-
-
-# for fid in all_fids_list:
-#     # print(f"Current substation: {fid}")
-#     # perc_prog = round(all_fids_list.index(fid) * 100 / len(all_fids_list),2)
-#     # print(f"Percentage progress: {perc_prog}%")
-
-#     print("Starting mapping...")
-
-#     is_fid_present = any(fid == row[0] for row in mapped_subs)
-
-#     if is_fid_present:
-#         print(f"fid {fid} is already in mapped_substations.")
-#     else:
-#         try:
-#             print("trying")
-#             nd = map_substation(fid, max_recursion_depth=20000)
-#             print("mapped")
-#             nd.to_sql()
-#             print("saved")
-#         except Exception as e:
-#             print(f"An error occurred: {e}")
+    print("Finished script")
 
 

@@ -186,9 +186,6 @@ def create_station_flux_lines_table(flux_db_path) -> None:
 
     # Create the new database
     file_path = flux_db_path
-    print(f"file path: {file_path}")
-    if os.path.exists(file_path):
-        os.remove(file_path)
 
     # Set up its structure
     connection = sqlite3.connect(file_path)
@@ -613,9 +610,9 @@ def get_mapped_substations_data() -> set:
         rows = cursor.fetchall()
 
         # Create a set to store the rows
-        result_set = set()
+        result_set = list()
         for row in rows:
-            result_set.add(tuple(row))
+            result_set.append(row[0])
 
         return result_set
     except sqlite3.Error as e:

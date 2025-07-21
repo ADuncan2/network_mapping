@@ -714,12 +714,13 @@ def map_substation(
     # Set up database connections
     conn_lv_assets = sqlite3.connect('data/lv_assets.sqlite')
     cursor_lv_assets = conn_lv_assets.cursor()
+
     # Checks if a database already exists for this path. If it doesn't it creates one, if it does it resets it
-    
     if not os.path.exists(flux_db_path):
         create_station_flux_lines_table(flux_db_path)
     if os.path.exists(flux_db_path):
         reset_station_flux_lines_table(flux_db_path)
+
     connection_flux = sqlite3.connect(flux_db_path)
     cursor_flux = connection_flux.cursor()
     connection_graph = sqlite3.connect('data/graph.sqlite')
