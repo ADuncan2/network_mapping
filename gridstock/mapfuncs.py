@@ -69,7 +69,7 @@ def lines_segmentation(
             bookends.append([start_fid,end_fid])
             start_point = end_point
             start_fid = end_fid
-    print(bookends)
+    
     return sub_lines, bookends
 
 ##checking for overlapping points in hyper-edges
