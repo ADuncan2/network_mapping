@@ -23,6 +23,8 @@ from itertools import combinations
 from gridstock.dbcleaning import (
     reset_station_flux_lines_table,
     create_station_flux_lines_table)
+import logging
+
 
 def interpolate_coordinates(coordinates, num_new_points):
     new_coordinates = []
@@ -95,7 +97,6 @@ def check_point_distances(points, threshold):
         # Create a new dictionary and remove the first matching key-value pair
         new_points = points.copy()
         key_to_remove = matching_keys[0]
-        print(f"points found to overlap, removed node:{key_to_remove}")
         del new_points[key_to_remove]
         return new_points
     else:
@@ -190,8 +191,8 @@ def add_points_and_divide_linestring(
     ordered_points = []
     start_index = 0
     
-    if len(insert_indices)!=len(points):
-        print("Insert_ind problem!")
+    # if len(insert_indices)!=len(points):
+    #     print("Insert_ind problem!")
 
     ##this section makes sure that the index used to add the first node to the line is found, without assuming it will be 0
     #this is because large amounts of interpolation may mean the start node will happen at the 1st or 2nd coordinate in the line
@@ -207,8 +208,8 @@ def add_points_and_divide_linestring(
 
     #this should run through the points on the line, starting from one end (which end?) and then adds each substring in order
     #it should output a list of all the points apart from the end one at index i=0, does it?
-    if len(points) != len(insert_indices):
-        print(f"something missing! points: {len(points)}, insert_ind: {len(insert_indices)}")
+    # if len(points) != len(insert_indices):
+    #     print(f"something missing! points: {len(points)}, insert_ind: {len(insert_indices)}")
     
     for i in range(len(coordinates)-1):
         if i > 0 and i in insert_indices.keys():
@@ -229,8 +230,8 @@ def add_points_and_divide_linestring(
     if len(outstanding) >= 1:
         ordered_points.append(outstanding[0])
     
-    if len(points)!=len(ordered_points):
-        print("ordered_points problem!")
+    # if len(points)!=len(ordered_points):
+    #     print("ordered_points problem!")
 
     bookends = []
     for i in range(len(ordered_points) - 1):
@@ -243,7 +244,8 @@ def add_points_and_divide_linestring(
 
 
 def DFS(
-        recorder: NetworkData, 
+        recorder: NetworkData,
+        log_batch, 
         current_asset: str,
         cursor_conn: sqlite3.Cursor,
         cursor_lv_assets: sqlite3.Cursor,
@@ -261,12 +263,12 @@ def DFS(
     """
     if hyper_edges is None:
         hyper_edges = []
+
     
-    #print(f"current asset: {current_asset}")
     recursion_depth += 1
     if max_recursion_depth:
         if recursion_depth > max_recursion_depth:
-            print("max recursion depth reached!")
+            log_batch.add_log(logging.WARNING, "Maximum recursion depth reached")
             return
 
     # Query the conn table for all connections to this asset
@@ -279,12 +281,6 @@ def DFS(
     
     rows_conn = cursor_conn.fetchall()
 
-    if rows_conn is None:
-        print(f"Nothing found in conn_comp for fid {current_asset}")
-        return
-    if len(rows_conn) == 0:
-        print(f"Nothing found in conn_comp for fid {current_asset}")
-        return
 
     # Query the lv_assets table to find everything out about this asset
     cursor_lv_assets.execute(
@@ -294,15 +290,10 @@ def DFS(
         )
     row_lv = cursor_lv_assets.fetchone()
     
-    if row_lv is None:
-        print(f"No properties found in LV table for fid {current_asset}")
-        return
-    if len(row_lv) == 0:
-        print(f"No properties found in LV table for fid {current_asset}")
-        return
+    # Determines what type of asset it is
     asset_type = row_lv[-1]
 
-    # All things joining this node
+    # All fids of things joining this asset
     joining_things = [
         (x[0] if x[1] == current_asset else x[1]) for x in rows_conn
     ]
@@ -324,11 +315,10 @@ def DFS(
         is_switch = row_lv[-2]
         is_substation = row_lv[-3]
         if is_substation:
-            print("substation reached!")
+            log_batch.add_log(logging.INFO, "Reached an adjoining substation")
             return
 
         if is_switch:
-            print(f"switch reached: {current_asset}")
             #Finding all the ways connected to the switch
             #Looking in conn rather than conn_comp because conn_comp removes ways in cleaning step
             cursor_conn.execute(
@@ -385,11 +375,10 @@ def DFS(
             if any(item in recorder.visited_edges for item in fid_without_ways_or_boundary):
                 fid_to_map = [fid for fid in fid_without_ways_or_boundary if fid not in recorder.visited_edges]
 
-                print(f"Reached closed switch and continuing to {fid_to_map}")
-
                 for x in fid_to_map:
                     DFS(
                         recorder,
+                        log_batch, 
                         x,
                         cursor_conn,
                         cursor_lv_assets,
@@ -402,7 +391,7 @@ def DFS(
                     )
 
             else:
-                print("Switch was open")
+                pass
 
             return
         # Recursively call the function on each unvisited thing
@@ -412,6 +401,7 @@ def DFS(
                     
                     DFS(
                         recorder,
+                        log_batch,
                         x,
                         cursor_conn,
                         cursor_lv_assets,
@@ -423,16 +413,13 @@ def DFS(
                         hyper_edges=hyper_edges
                     )
             else:
-                #print(f"Nothing joining {current_asset}")
-                #print(f"It had these joining things: {joining_things}")
-                #print(f"But {vis} were already visisted.")
-                #print("gets here")
                 return
         except TypeError as e:
-            print(e)
+            log_batch.add_log(logging.ERROR, e)
             return
 
     elif asset_type == "edge":
+        
         # If this is a regular edge
         if len(joining_things) == 2: 
 
@@ -452,16 +439,9 @@ def DFS(
             cursor_graph.execute(query, (target_string_with_wildcard,))
             row_graph = cursor_graph.fetchone()
             if row_graph is not None:
-                print("new names of hyperedge already exist")
+                log_batch.add_log(logging.WARNING, "An edge reached already had it's name in the edge_list of graph.sqlite")
                 return
 
-
-            # cursor_graph.execute(
-            #     f"SELECT * FROM edge_list WHERE fid = {int(current_asset)}"
-            # )
-            # row_graph = cursor_graph.fetchone()
-            # if row_graph != None:
-            #     return
 
             # Check if it a flux edge
             # If it is then return
@@ -494,6 +474,7 @@ def DFS(
             x = joining_things[0] if joining_things[1] in recorder.visited_nodes else joining_things[1]
             DFS(
                 recorder,
+                log_batch,
                 x,
                 cursor_conn,
                 cursor_lv_assets,
@@ -524,7 +505,7 @@ def DFS(
             row_graph = cursor_graph.fetchone()
             
             if row_graph is not None:
-                print("New names of hyper_edge were present in database")
+                log_batch.add_log(logging.WARNING, "A hyper edge reached already had it's name in the edge_list of graph.sqlite")
                 return
 
             # Pass the edge's geometry together with this 
@@ -554,7 +535,7 @@ def DFS(
                     )
                     points[point] = wkb.loads(cursor_lv_assets.fetchone()[0])
                 except:
-                    print(f"Point {point} not found")
+                    log_batch.add_log(logging.WARNING, "A point in a hyper edge was found to be missing from lv_assets")
                     points[point] = None
                     # Look up this points geom? 
                     # use cursor conn
@@ -572,12 +553,7 @@ def DFS(
             sub_edge_geoms, bookends = add_points_and_divide_linestring(
                 edge_geom, points
                 )
-            # if int(current_asset) == 9144845:
-            #     print("bookends:")
-            #     print(bookends)
-            #     print(f"points: {len(points)}")
-            #     print(f"bookends: {len(bookends)}")
-            #     print("Look here ^^^^^^^^^^^^^^^^^^^^^^^")
+            
             
             # Now each of these sub edges needs recording.
             # They should inheret the properties of the 
@@ -615,7 +591,7 @@ def DFS(
                 )
                 row_graph = cursor_graph.fetchone()
                 if row_graph != None:
-                    print("sub_edge id was already in edge list!")
+                    log_batch.add_log(logging.WARNING, "Issue with breaking down a hyper edge")
                     return
 
                 start_node, end_node = bookends[i]
@@ -636,6 +612,7 @@ def DFS(
                     # Now call the function recursively 
                     DFS(
                         recorder,
+                        log_batch,
                         node,
                         cursor_conn,
                         cursor_lv_assets,
@@ -687,6 +664,7 @@ def flux_way_check(fid, cursor):
 def map_substation(
         substation_fid: int,
         flux_db_path: str,
+        log_batch,
         max_recursion_depth: int = 2000
         ) -> NetworkData:
 
@@ -737,7 +715,7 @@ def map_substation(
     if row_lv is not None:
         net_data.substation_geom = row_lv[1]
     else:
-        print("Substation not found in LV assets")
+        log_batch.add_log(logging.WARNING, "Couldnt find the substation in lv_assets")
 
     # check that all incident edges are wires
     #TODO put this check into the substation cleaning function so it doesn't have to be carried out each time
@@ -754,27 +732,28 @@ def map_substation(
             if edge_details[-1] == 'edge':
                 incident_edges_filter.append(edge)
             else:
-                print(f"{edge} was excluded as it is not an edge")
+                log_batch.add_log(logging.WARNING, "A non-wire object crossed the substation boundary")
         else:
-            print(f"Couldn't find out if {edge} was an edge from LV assets")
+            log_batch.add_log(logging.WARNING, "A non-wire object crossed the substation boundary")
 
+    ## Check if the edges are connected to Ways in the subsation, and if those Ways are open or closed
     way_status = []
     for edge in incident_edges_filter:
         way_bool = flux_way_check(edge, cursor_net)
         way_status.append(way_bool)
-    print(f"way status: {way_status}")
+    
+    # Record if there's no information on the Ways
+    if not way_status:
+        log_batch.add_log(logging.WARNING, "No Ways found connected to wires in this substation")
 
-    print(f"Starting depth first search on substation {substation_fid}")
+
     for e in incident_edges_filter:
-        print(f"Searching branch: {e}")
-        DFS(net_data, e, cursor_net, cursor_lv_assets,
+        
+        DFS(net_data, log_batch, e, cursor_net, cursor_lv_assets,
             cursor_flux, cursor_graph, connection_flux, 0, 
             max_recursion_depth=max_recursion_depth,hyper_edges = None)
         
     net_data.substation = substation_fid
-    print("finishes DFS!")
-    #print("incident list:")
-    #print(net_data.incidence_list)
 
     # Close down all database connections
     cursor_lv_assets.close()
@@ -785,7 +764,7 @@ def map_substation(
     cursor_net.close()
     connection_net.close()
 
-    return net_data
+    return (net_data, log_batch)
 
 
 
