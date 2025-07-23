@@ -1,0 +1,96 @@
+
+### EPOCH DEFINITION
+epoch_vars:
+  coincidence: [0.1, 0.2 , 0.3, 0.4, 0.5, 0.6]
+  lct_uptake: [0.1,0.3, 0.5,0.7]
+  max_lct_load: [0.005, 0.01, 0.015, 0.02]
+  max_load: [0.003]
+
+# NOTE: no type protection for new epoch_vars
+# Key epoch vars coincidence, lct_uptake, max_lct_load, max_load
+
+### DESIGN VARIABLES NAMES
+design_vars:
+  active: ["household_storage" ,"line_rating","flexibility"]
+  class_map:
+    line_rating: LineRating
+    heat_network: HeatNetwork
+    gas_grid: GasGrid
+    household_storage: StorageHousehold
+    flexibility: FlexService
+
+### DESIGN VARIABLE ASSUMPTIONS
+# Given in the format var_name > technology/cost > name of assumption
+design_assumptions:
+
+  household_storage:
+    technology:
+      battery_capacity:
+        small: 0.001 #MW
+        medium: 0.002
+        large: 0.003
+    cost:
+      cost_of_storage: 1000 #£/kW
+
+  flexibility:
+    technology:
+      reduction_in_coinc:
+        small: 0.05 #taken away from epoch coincidence
+        medium: 0.1
+        large: 0.15
+      min_coinc: 0.07
+    cost:
+      cost_of_flex: 5 #£/kW for flexibility (cost of individual flex is probably closer to £1/kW, but this assumes that you need to spend money on this scheme beyond just the worst case) new new
+
+  line_rating:
+    technology:
+      new_line_type: "NA2XS2Y 1x240 RM/25 6/10 kV" #Linetype from PandaPower database of line types
+    cost:
+      line_uprating: 98000 #£/km
+  
+
+### UTILITY CALCULATION
+utility_model:
+  all_utilities: 
+    - reliability
+    - decarbonisation
+
+  active_utilities:
+    - reliability
+
+  weights:
+    decarbonisation: 1
+    # reliability will use default (equal) weight
+
+  reliability_assumptions:
+    genetic_alg:
+      generations: 0
+      population: 0
+
+
+### BASE MODEL DEFINITION AND ASSUMPTIONS
+definitions:
+  mid_network_nodes: 2
+
+create_ppnetwork:
+  ext_grid_params:
+    vm_pu: 1                        # Defines the input voltage from the external grid
+  
+  transformer_parameters:
+    hv_bus: 0
+    lv_bus: 1
+    sn_mva: 0.4
+    vn_hv_kv: 11.0
+    vn_lv_kv: 0.4
+    vkr_percent: 1.3
+    vk_percent: 4.0
+    pfe_kw: 0.95
+    i0_percent: 0.24
+    name: "Trafo"
+  default_cross_section: 300        # mm^2
+  resistivity_of_al: 2.65e-8        # Ohm·m
+  default_reactive_power: 0.0005    # MVAR
+  lamp_post_load_size:
+    p_mw: 0.0001
+    q_mvar: 0.0005
+

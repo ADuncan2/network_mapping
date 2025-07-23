@@ -8,6 +8,8 @@ os.environ['USE_PYGEOS'] = '0'
 import geopandas
 import sqlite3
 from gridstock.recorder import NetworkData
+from gridstock.network_parsing import DistributionNetwork
+from gridstock.config_manager import ConfigManager
 from shapely.geometry import Point, LineString, shape
 from shapely import wkb
 from pyproj import Transformer
@@ -754,6 +756,16 @@ def map_substation(
             max_recursion_depth=max_recursion_depth,hyper_edges = None)
         
     net_data.substation = substation_fid
+
+    # Reads the current config yaml file to get settings for current run
+    config = ConfigManager('gridstock/config.yaml')
+
+    pnet = DistributionNetwork(substation_fid, log_batch)
+    pnet.get_substation_networkx(net_data)
+    pnet.create_ppnetwork(config)
+    num_of_loads = len(pnet.service_points)
+    
+    log_batch.add_log(logging.INFO, f"Pandapower network created with {num_of_loads} loads (exc. lamp posts)")
 
     # Close down all database connections
     cursor_lv_assets.close()
