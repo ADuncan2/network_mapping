@@ -237,7 +237,7 @@ class DistributionNetwork:
                     ## Create a bus in the pandapower network
                     pp.create_bus(self.ppnet, vn_kv=0.4, name=node_id, geodata= coordinates)
                 except Exception as e:
-                    print(f"Node could not be made into pandpower bus: {e}")
+                    self.log_batch.add_log(logging.WARNING, f"Node could not be made into pandpower bus because: {e}")
         
         # Go through all of the edges in the networkx graph
         # and add in the lines in pandapower. Also maintain a dictionary mapping
