@@ -11,6 +11,8 @@ import sqlite3
 from shapely import wkb
 from shapely.ops import linemerge
 from shapely.geometry import LineString
+import csv
+import os
 
 
 class NetworkData:
@@ -43,6 +45,9 @@ class NetworkData:
     edge_list : list[list[Any]]
         List whose rows contain a list containing all the 
         data grabed from assets pertaining to each edge.
+
+    summary_stats : dict[str, Any]
+        Dictionary containing summary statistics of the network for saving as summary CSV
     """
     def __init__(self) -> None:
         self.counter = 0
@@ -54,11 +59,12 @@ class NetworkData:
         self.incidence_list = []
         self.node_list = []
         self.edge_list = []
+        self.summary_stats = {}
 
     def __str__(self) -> str:
         msg = f"""
         NetworkData recorder object containing:
-        {len(self.node_list)} nodes, {len(self.edge_list)} edges and {len(self.substations)} substations.
+        {len(self.node_list)} nodes, {len(self.edge_list)} edges and {len(self.substation)} substations.
         """
         return msg
     
@@ -165,4 +171,20 @@ class NetworkData:
             connection.close()
             cursor_lv.close()
             connection_lv.close()
+
+    def to_csv(self, fname: str = "data/summary.csv") -> None:
+        """
+        Save the summary_stats dictionary to a CSV as a new row.
+        """
+        if not hasattr(self, "summary_stats") or not isinstance(self.summary_stats, dict):
+            pass
+
+        # Check if the CSV already exists
+        file_exists = os.path.exists(fname)
+
+        with open(fname, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=self.summary_stats.keys())
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(self.summary_stats)
 

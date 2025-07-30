@@ -148,9 +148,6 @@ def log_writer(log_queue, result_queue, num_expected):
                 
                 # Add duration summary for this FID
                 logger.info(f"Processing duration: {duration}", extra={'fid': log_item.fid})
-                logger.info("-----------------------------------------------")
-                logger.info("-----------------------------------------------")
-                logger.info("-----------------------------------------------")
 
                 # Force flush to disk immediately
                 for handler in logger.handlers:
@@ -168,7 +165,13 @@ def log_writer(log_queue, result_queue, num_expected):
             result_processed = True
             
             try:
+                # Save network data to database
                 network_data.to_sql()
+
+                # If the network data has summary stats, save them as well
+                if hasattr(network_data, 'summary_stats'):
+                    network_data.to_csv()
+                    pass
                 completed += 1
                 stats['completed'] += 1
                 
@@ -272,8 +275,13 @@ def worker_single(args):
                 pass  # If we can't add fid, that's okay
         
         
-
+        ## Dump the logs into the log queue
         log_batch.finalize()
+
+        # Update summary_stats to show that mapping was successful
+        if hasattr(netdata, 'summary_stats'):
+            netdata.summary_stats['success'] = True
+        
         
         return ('success', netdata, log_batch)
         
@@ -306,7 +314,7 @@ def main():
     print("Checking for previously mapped substations...")
     mapped_subs = get_mapped_substations_data()
     fids = [fid for fid in all_fids_list if fid not in mapped_subs]
-    fids = fids[246:267]
+    fids = fids[246:274]
 
     print(f"Total substations available: {len(all_fids_list)}")
     print(f"Already mapped: {len(mapped_subs)}")
@@ -356,7 +364,7 @@ def main():
                 
                 # Send result data if successful
                 if status == 'success' and netdata is not None:
-                    # result_queue.put(netdata)
+                    result_queue.put(netdata)
                     successful_mappings += 1
                 else:
                     failed_mappings += 1

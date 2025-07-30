@@ -26,6 +26,7 @@ from gridstock.dbcleaning import (
     reset_station_flux_lines_table,
     create_station_flux_lines_table)
 import logging
+import csv
 
 
 def interpolate_coordinates(coordinates, num_new_points):
@@ -666,7 +667,7 @@ def flux_way_check(fid, cursor):
 def length_of_edges(
         net_data: NetworkData,
         log_batch: logging.Logger
-        ) -> None:
+        ) -> int:
     """
     Function to log the length of all edges in the network.
     """
@@ -679,12 +680,14 @@ def length_of_edges(
         logging.INFO,
         f"Total length of edges in the network: {(total_length/1000):.2f} km"
         )
+    DFS_edge_length = total_length / 1000  # Convert to km
+    return DFS_edge_length
 
 
 def log_stats_of_dfs(
         net_data: NetworkData,
         log_batch: logging.Logger
-        ) -> None:
+        ) -> int:
     """
     Function to log the stats of the DFS run.
     """
@@ -692,6 +695,15 @@ def log_stats_of_dfs(
     log_batch.add_log(logging.INFO, "------- DFS stats -------")
 
     service_points = [node for node in net_data.node_list if node[2] == 'Service Point']
+
+    if len(service_points) == 0:
+        ## I want code here that will cause an exception to be raised if no service points are found and end this itteration
+        log_batch.add_log(
+            logging.ERROR,
+            "No service points found in the network. "
+            "Please check the input data and try again."
+            )
+        raise ValueError("No service points found in the network.")
 
     # Log the stats of the DFS run
     log_batch.add_log(
@@ -702,7 +714,8 @@ def log_stats_of_dfs(
         )
 
     # Run function to record the total length of the edges in the network
-    length_of_edges(net_data, log_batch)
+    DFS_edge_length = length_of_edges(net_data, log_batch)
+    return DFS_edge_length
 
 def map_substation(
         substation_fid: int,
@@ -801,7 +814,7 @@ def map_substation(
     net_data.substation = substation_fid
 
     ## Check the net_data object to make sure it's consistent, and to allow comparison with later steps of mapping to make sure data is not being lost
-    log_stats_of_dfs(net_data, log_batch)
+    DFS_edge_length = log_stats_of_dfs(net_data, log_batch)
 
     # Reads the current config yaml file to get settings for current run
     config = ConfigManager('gridstock/config.yaml')
@@ -819,6 +832,22 @@ def map_substation(
     # Simulate the pandapower network to check it runs
     pnet.simulate_ppnetwork(config)
 
+    percent_difference = 1 - (pnet.pp_edge_length/DFS_edge_length  * 100) if DFS_edge_length != 0 else None
+
+    ## Write summary statistics to a csv file
+    summary_stats = {
+        "substation_fid": substation_fid,
+        "success": None,
+        "warnings_or_errors": any(log["level"] >= logging.WARNING for log in log_batch.messages),
+        "service_points": len(pnet.service_points),
+        "DFS_edge_length_km": DFS_edge_length,
+        "pp_edge_length_km": pnet.pp_edge_length,
+        "percent_difference": percent_difference,
+    }
+
+    # Save the summary stats in the net_data object to allow it to be saved by the worker
+    net_data.summary_stats = summary_stats
+
     # Close down all database connections
     cursor_lv_assets.close()
     conn_lv_assets.close()
@@ -829,7 +858,6 @@ def map_substation(
     connection_net.close()
 
     return (net_data, log_batch)
-
 
 
 

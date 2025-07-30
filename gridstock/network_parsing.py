@@ -28,6 +28,7 @@ class DistributionNetwork:
         self.service_points = []
         self.switches = []
         self.lamp_posts = []
+        self.pp_edge_length = 0.0  # Total length of edges in pandapower network
 
         # Create empty pandapower and networkx networks
         self.net = nx.Graph()
@@ -382,6 +383,7 @@ class DistributionNetwork:
             self.log_batch.add_log(logging.INFO, f"Network has 0 km of lines")
         else:
             line_length = self.ppnet.line["length_km"].sum()
+            self.pp_edge_length = line_length
             self.log_batch.add_log(logging.INFO, f"Network has {line_length:.2f} km of lines")
 
 
