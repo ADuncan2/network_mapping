@@ -148,7 +148,10 @@ def log_writer(log_queue, result_queue, num_expected):
                 
                 # Add duration summary for this FID
                 logger.info(f"Processing duration: {duration}", extra={'fid': log_item.fid})
-                
+                logger.info("-----------------------------------------------")
+                logger.info("-----------------------------------------------")
+                logger.info("-----------------------------------------------")
+
                 # Force flush to disk immediately
                 for handler in logger.handlers:
                     handler.flush()
@@ -241,6 +244,8 @@ def log_writer(log_queue, result_queue, num_expected):
     
     return stats
 
+
+
 def worker_single(args):
     """Process a single FID and return batched logs"""
     fid, worker_id = args
@@ -301,7 +306,7 @@ def main():
     print("Checking for previously mapped substations...")
     mapped_subs = get_mapped_substations_data()
     fids = [fid for fid in all_fids_list if fid not in mapped_subs]
-    # fids = fids[15:35]
+    fids = fids[246:267]
 
     print(f"Total substations available: {len(all_fids_list)}")
     print(f"Already mapped: {len(mapped_subs)}")
@@ -310,8 +315,9 @@ def main():
     if len(fids) == 0:
         print("No substations to process!")
         return
+        
 
-    # Calculate optimal number of workers
+    # Calculate number of workers
     num_of_workers = min(cpu_count() - 1, len(fids), 8)  # Cap at 8 to avoid too many temp files
     print(f"Using {num_of_workers} worker processes")
 
@@ -350,7 +356,7 @@ def main():
                 
                 # Send result data if successful
                 if status == 'success' and netdata is not None:
-                    result_queue.put(netdata)
+                    # result_queue.put(netdata)
                     successful_mappings += 1
                 else:
                     failed_mappings += 1
@@ -379,6 +385,8 @@ def main():
         print(f"\nImmediate results: {successful_mappings} successful, {failed_mappings} failed")
         print("Check the log file for detailed information about each substation.")
         print("Mapping process completed!")
+
+        
 
 if __name__ == "__main__":
     main()

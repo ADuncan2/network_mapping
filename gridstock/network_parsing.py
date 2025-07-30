@@ -136,6 +136,43 @@ class DistributionNetwork:
         #     print(f"initial_num_of_nodes: {num_nodes_after_node_initialisation}")
         #     raise Warning("Spurious nodes added during edge creation.")
         
+        # Check the network for consistency and common errors and log the summary to the error log
+        # And create list of lamp posts (nodes of degree 1 that are not service points or switches)
+        self.check_net()
+
+
+    def check_net(self) -> None:
+        """
+        Function to check the networkx graph for consistency and common errors.
+        Logs summary information and problems found using the provided log_batch.
+        And creates a list of lamp posts (nodes of degree 1 that are not service points or switches).
+        """
+        issues_found = False
+        
+        self.log_batch.add_log(logging.INFO, "------- Networkx stats -------")
+        
+        # Check that the grid is connected
+        if not nx.is_connected(self.net):
+            self.log_batch.add_log(logging.ERROR, f"The networkx graph created is not connected")
+
+        # Check for isolated nodes
+        isolated_nodes = list(nx.isolates(self.net))
+        if isolated_nodes:
+            self.log_batch.add_log(logging.WARNING,
+                f"There are {len(isolated_nodes)} isolated nodes in the network.")
+            issues_found = True
+
+        if not isinstance(self.net, nx.MultiGraph):
+            self.log_batch.add_log(logging.INFO, "Network is a simple graph (no parallel edges).")
+        else:
+            self.log_batch.add_log(logging.INFO, "Network is a multigraph (contains parallel edges).")
+            issues_found = True
+
+        if nx.is_tree(self.net):
+            self.log_batch.add_log(logging.INFO, "Network is radial (no cycles).")
+        else:
+            self.log_batch.add_log(logging.INFO, "Network is not radial (contains cycles).")
+
         # Check the nodes are all accounted for; i.e. check that all nodes of 
         # degree 1 are either the substation, a service point, or a switch.
         # If they are not, then, for now, label them as a lamp post!
@@ -148,10 +185,19 @@ class DistributionNetwork:
                 if node not in self.service_points and node not in self.switches and node != self.fid:
                     self.lamp_posts.append(node)
 
-        # Check that the grid is connected
-        if not nx.is_connected(self.net):
-            self.log_batch.add_log(logging.ERROR, f"The networkx graph created is not connected")
-
+        # Log basic network summary
+        self.log_batch.add_log(logging.INFO, f"Networkx summary: {self.net.number_of_nodes()} nodes, "
+                                        f"{len(self.service_points)} service points, "
+                                        f"{len(self.lamp_posts)} lamp posts, "
+                                        f"{self.net.number_of_edges()} edges"
+                                        )
+        # Final result
+        if issues_found:
+            self.log_batch.add_log(logging.ERROR, "Network check failed: one or more issues were found.")
+            return False
+        else:
+            self.log_batch.add_log(logging.INFO, "Network passed all checks.")
+            return True
 
     def create_ppnetwork(self, config) -> None:
         """
@@ -237,7 +283,8 @@ class DistributionNetwork:
                     ## Create a bus in the pandapower network
                     pp.create_bus(self.ppnet, vn_kv=0.4, name=node_id, geodata= coordinates)
                 except Exception as e:
-                    self.log_batch.add_log(logging.WARNING, f"Node could not be made into pandpower bus because: {e}")
+                    # self.log_batch.add_log(logging.WARNING, f"Node could not be made into pandpower bus because: {e}")
+                    pass
         
         # Go through all of the edges in the networkx graph
         # and add in the lines in pandapower. Also maintain a dictionary mapping
@@ -277,19 +324,6 @@ class DistributionNetwork:
 
             # Assign the closest cable name to the edge data
             data['std_type'] = closest_cable
-        
-        # # Summarize the different std_types and their frequencies
-        # std_type_counts = {}
-        # for _, _, data in self.net.edges(data=True):
-        #     std_type = data.get("std_type", "Unknown")
-        #     if std_type in std_type_counts:
-        #         std_type_counts[std_type] += 1
-        #     else:
-        #         std_type_counts[std_type] = 1
-
-        # # Print the std_type counts
-        # for std_type, count in std_type_counts.items():
-        #     print(f"Standard Type: {std_type}, Count: {count}")
 
         for u, v, data in self.net.edges(data=True):
             try:
@@ -297,23 +331,143 @@ class DistributionNetwork:
                 self.edge_num_dict[data["edge_fid"]] = edge_num
                 edge_num += 1
             except Exception as e:
-                self.log_batch.add_log(logging.WARNING, f"Could not add an edge to pandapower because: {e}")
+                # self.log_batch.add_log(logging.WARNING, f"Could not add an edge to pandapower because: {e}")
+                pass
         # Got through service points and lamp posts and add loads
         # NOTE: this puts the loads as 1kW by default, ready to be scaled by whatever load profile is applied. q_mvar is just guessed at this stage, as is lampost load size
+        failed_service_points = []
         for service_point in self.service_points:
             try:
-                pp.create_load(self.ppnet, bus=bus_num_dict[service_point], p_mw=0.0, q_mvar=config.get("create_ppnetwork","default_reactive_power"), name=service_point)
+                # Get p_mw and q_mvar from the config file
+                service_point_p = config.get("create_ppnetwork","default_load_size", "p_mw")
+                service_point_p = str(service_point_p)  # Ensure service point is a string
+
+                pp.create_load(self.ppnet, bus_num_dict[service_point], p_mw=service_point_p, q_mvar=config.get("create_ppnetwork","default_load_size", "q_mvar"), name=service_point)
             except Exception as e:
-                self.log_batch.add_log(logging.WARNING, f"Could not add an service point to pandapower because: {e}")
+                # print(f"Could not add service point {service_point} to pandapower because: {e}")
+                failed_service_points.append(service_point)
             # pp.create_storage(self.ppnet, bus=bus_num_dict[service_point], p_mw = -0.003,max_e_mwh = 0.013, soc_percent = 1.0, min_e_mwh = 0, controllable = False)
         for lamp_post in self.lamp_posts:
             try:
                 pp.create_load(self.ppnet, bus_num_dict[lamp_post], p_mw=config.get("create_ppnetwork", "lamp_post_load_size", "p_mw"), q_mvar=config.get("create_ppnetwork", "lamp_post_load_size", "q_mvar"), name=lamp_post)
             except Exception as e:
-                self.log_batch.add_log(logging.WARNING, f"Could not add an lamp post to pandapower because: {e}")
+                # self.log_batch.add_log(logging.WARNING, f"Could not add an lamp post to pandapower because: {e}")
+                pass
         # Set all indices to be fids
+        if failed_service_points:
+            self.log_batch.add_log(logging.WARNING, f"Failed to create loads for {len(failed_service_points)} service points")
+            pass
+
         self.ppnet.load.set_index('name', inplace=True)
 
+
+    def check_pandapower_network(self):
+        """
+        Checks a pandapower network for internal consistency and common errors.
+        Logs summary information and problems found using the provided log_batch.
+        
+        Returns True if network passes checks, False otherwise.
+        """
+        issues_found = False
+
+        self.log_batch.add_log(logging.INFO, "------- Pandapower stats -------")
+
+        # Log basic network summary
+        self.log_batch.add_log(logging.INFO, f"Network summary: {len(self.ppnet.bus)} buses, "
+                                        f"{len(self.ppnet.load)} loads, "
+                                        f"{len(self.ppnet.line)} lines"
+                                        )
+
+        if "line" not in self.ppnet or self.ppnet.line.empty:
+            self.log_batch.add_log(logging.INFO, f"Network has 0 km of lines")
+        else:
+            line_length = self.ppnet.line["length_km"].sum()
+            self.log_batch.add_log(logging.INFO, f"Network has {line_length:.2f} km of lines")
+
+
+        elements_with_bus = ["load", "line", "trafo"]
+
+        for element in elements_with_bus:
+            if element in self.ppnet:
+                df = self.ppnet[element]
+                if "bus" in df.columns:
+                    # Check for NaNs in bus column
+                    nan_bus = df[df["bus"].isna()]
+                    if not nan_bus.empty:
+                        self.log_batch.add_log(logging.ERROR,
+                            f"One or more elements in '{element}' have NaN bus references. This will cause the power flow to fail.")
+                        issues_found = True
+
+        # Find buses not connected to ext_grid
+        disconnected = pp.topology.unsupplied_buses(self.ppnet)
+        if disconnected:
+            self.log_batch.add_log(logging.WARNING, f"Unsupplied buses detected: {disconnected}")
+
+        # Final result
+        if issues_found:
+            self.log_batch.add_log(logging.ERROR, "Pandapower network check failed: one or more issues were found.")
+            return False
+        else:
+            self.log_batch.add_log(logging.INFO, "Pandapower network passed all checks.")
+            return True
+
+    def simulate_ppnetwork(self, config) -> None:
+        """
+        Function to run pandapower simulations on the pandapower network with default load sizes to check that power flow converges.
+        """
+        self.log_batch.add_log(logging.INFO, "-------- Running pandapower power flow simulation ----")
+        
+        self.check_for_bad_data()
+        # # Run a power flow simulation
+        pp.runpp(self.ppnet, max_iteration=500, tolerance_mva=1e-6)
+        
+        # Check if the power flow converged
+        if not self.ppnet.converged:
+            self.log_batch.add_log(logging.ERROR, "Pandapower power flow did not converge")
+        else:
+            self.log_batch.add_log(logging.INFO, "Pandapower power flow converged successfully")
+
+        
+    def check_for_bad_data(self) -> None:
+        # Check for missing or empty ext_grid
+        if "ext_grid" not in self.ppnet or self.ppnet.ext_grid.empty:
+            self.log_batch.add_log(logging.ERROR, "No external grid found in the network.")
+
+        # Check loads
+        if "load" in self.ppnet and not self.ppnet.load.empty:
+            load = self.ppnet.load
+
+            # Identify bad load entries
+            bad_p = load[load["p_mw"].isnull() | (load["p_mw"] < 0)]
+            bad_q = load[load["q_mvar"].isnull() | (load["q_mvar"] < 0)]
+
+            if not bad_p.empty:
+                self.log_batch.add_log(
+                    logging.ERROR,
+                    f"Load has NaN or negative active power values at indices: "
+                    f"{bad_p.index.tolist()} with values: {bad_p['p_mw'].tolist()}"
+                )
+
+            if not bad_q.empty:
+                self.log_batch.add_log(
+                    logging.ERROR,
+                    f"Load has NaN or negative reactive power values at indices: "
+                    f"{bad_q.index.tolist()} with values: {bad_q['q_mvar'].tolist()}"
+                )
+
+        # Check lines
+        if "line" in self.ppnet and not self.ppnet.line.empty:
+            line = self.ppnet.line
+            bad_lines = line[
+                (line["length_km"] <= 0) |
+                (line["r_ohm_per_km"] < 0) |
+                (line["x_ohm_per_km"] < 0)
+            ]
+            if not bad_lines.empty:
+                self.log_batch.add_log(
+                    logging.ERROR,
+                    f"{len(bad_lines)} lines have invalid parameters at indices: {bad_lines.index.tolist()}"
+                )
 
 
 

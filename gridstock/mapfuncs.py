@@ -76,7 +76,7 @@ def lines_segmentation(
     
     return sub_lines, bookends
 
-##checking for overlapping points in hyper-edges
+## checking for overlapping points in hyper-edges
 #if overlapping points present one of the points is deleted. 
 #This could be changed in future to check which points are nodes and delete the other, for now it just deletes at random AS A TEST
 def check_point_distances(points, threshold):
@@ -317,7 +317,7 @@ def DFS(
         is_switch = row_lv[-2]
         is_substation = row_lv[-3]
         if is_substation:
-            log_batch.add_log(logging.INFO, "Reached an adjoining substation")
+            # log_batch.add_log(logging.INFO, "Reached an adjoining substation")
             return
 
         if is_switch:
@@ -417,7 +417,7 @@ def DFS(
             else:
                 return
         except TypeError as e:
-            log_batch.add_log(logging.ERROR, e)
+            # log_batch.add_log(logging.ERROR, e)
             return
 
     elif asset_type == "edge":
@@ -441,7 +441,7 @@ def DFS(
             cursor_graph.execute(query, (target_string_with_wildcard,))
             row_graph = cursor_graph.fetchone()
             if row_graph is not None:
-                log_batch.add_log(logging.WARNING, "An edge reached already had it's name in the edge_list of graph.sqlite")
+                # log_batch.add_log(logging.WARNING, "An edge reached already had it's name in the edge_list of graph.sqlite")
                 return
 
 
@@ -507,7 +507,7 @@ def DFS(
             row_graph = cursor_graph.fetchone()
             
             if row_graph is not None:
-                log_batch.add_log(logging.WARNING, "A hyper edge reached already had it's name in the edge_list of graph.sqlite")
+                # log_batch.add_log(logging.WARNING, "A hyper edge reached already had it's name in the edge_list of graph.sqlite")
                 return
 
             # Pass the edge's geometry together with this 
@@ -537,7 +537,7 @@ def DFS(
                     )
                     points[point] = wkb.loads(cursor_lv_assets.fetchone()[0])
                 except:
-                    log_batch.add_log(logging.WARNING, "A point in a hyper edge was found to be missing from lv_assets")
+                    # log_batch.add_log(logging.WARNING, "A point in a hyper edge was found to be missing from lv_assets")
                     points[point] = None
                     # Look up this points geom? 
                     # use cursor conn
@@ -593,7 +593,7 @@ def DFS(
                 )
                 row_graph = cursor_graph.fetchone()
                 if row_graph != None:
-                    log_batch.add_log(logging.WARNING, "Issue with breaking down a hyper edge")
+                    # log_batch.add_log(logging.WARNING, "Issue with breaking down a hyper edge")
                     return
 
                 start_node, end_node = bookends[i]
@@ -662,6 +662,47 @@ def flux_way_check(fid, cursor):
     conn_assets_ways.close()
 
     return False if not closed_way_fids else True
+
+def length_of_edges(
+        net_data: NetworkData,
+        log_batch: logging.Logger
+        ) -> None:
+    """
+    Function to log the length of all edges in the network.
+    """
+    total_length = 0.0
+    for edge in net_data.edge_list:
+        edge_geom = wkb.loads(edge[1])
+        total_length += edge_geom.length
+    
+    log_batch.add_log(
+        logging.INFO,
+        f"Total length of edges in the network: {(total_length/1000):.2f} km"
+        )
+
+
+def log_stats_of_dfs(
+        net_data: NetworkData,
+        log_batch: logging.Logger
+        ) -> None:
+    """
+    Function to log the stats of the DFS run.
+    """
+
+    log_batch.add_log(logging.INFO, "------- DFS stats -------")
+
+    service_points = [node for node in net_data.node_list if node[2] == 'Service Point']
+
+    # Log the stats of the DFS run
+    log_batch.add_log(
+        logging.INFO,
+        f"DFS finished with {len(net_data.node_list)} nodes, "
+        f"{len(service_points)} service points, "
+        f"{len(net_data.edge_list)} edges"
+        )
+
+    # Run function to record the total length of the edges in the network
+    length_of_edges(net_data, log_batch)
 
 def map_substation(
         substation_fid: int,
@@ -734,9 +775,10 @@ def map_substation(
             if edge_details[-1] == 'edge':
                 incident_edges_filter.append(edge)
             else:
-                log_batch.add_log(logging.WARNING, "A non-wire object crossed the substation boundary")
-        else:
-            log_batch.add_log(logging.WARNING, "A non-wire object crossed the substation boundary")
+                # log_batch.add_log(logging.WARNING, "A non-wire object crossed the substation boundary")
+                # return
+                pass
+            
 
     ## Check if the edges are connected to Ways in the subsation, and if those Ways are open or closed
     way_status = []
@@ -744,9 +786,10 @@ def map_substation(
         way_bool = flux_way_check(edge, cursor_net)
         way_status.append(way_bool)
     
-    # Record if there's no information on the Ways
-    if not way_status:
-        log_batch.add_log(logging.WARNING, "No Ways found connected to wires in this substation")
+    # # Record if there's no information on the Ways
+    # if not way_status:
+    #     log_batch.add_log(logging.WARNING, "No Ways found connected to wires in this substation")
+    #     return
 
 
     for e in incident_edges_filter:
@@ -757,15 +800,24 @@ def map_substation(
         
     net_data.substation = substation_fid
 
+    ## Check the net_data object to make sure it's consistent, and to allow comparison with later steps of mapping to make sure data is not being lost
+    log_stats_of_dfs(net_data, log_batch)
+
     # Reads the current config yaml file to get settings for current run
     config = ConfigManager('gridstock/config.yaml')
 
+    # Create a DistributionNetwork object
     pnet = DistributionNetwork(substation_fid, log_batch)
+
+    # Create the networkx graph from the net_data object
     pnet.get_substation_networkx(net_data)
+
+    # Create a pandapower network from the net_data object
     pnet.create_ppnetwork(config)
-    num_of_loads = len(pnet.service_points)
-    
-    log_batch.add_log(logging.INFO, f"Pandapower network created with {num_of_loads} loads (exc. lamp posts)")
+    pnet.check_pandapower_network()
+
+    # Simulate the pandapower network to check it runs
+    pnet.simulate_ppnetwork(config)
 
     # Close down all database connections
     cursor_lv_assets.close()
@@ -830,38 +882,3 @@ def get_background_map_and_bounds(
     del(gdf)
     return min_x, min_y, max_x, max_y
     
-
-def get_subs_in_region(
-        centroid: Point,
-        radius: int | float
-    ) -> list:
-
-    buffered_area = centroid.buffer(radius)
-    nearby_subs = []
-    with fiona.open('data/assets.gpkg', layer='General Boundary', crs="osgb36") as src:
-        for feature in src.filter(bbox=buffered_area.bounds):
-            if feature['properties']['Boundary Type'] == 'Substation Curtilage':
-
-                # Get the geometry and ID of the substation
-                substation_geom = shape(feature['geometry'])
-                substation_fid = feature['properties']['FID']
-                nearby_subs.append([substation_geom, substation_fid])
-    return nearby_subs
-
-
-def get_switches_in_region(
-        centroid: Point,
-        radius: int | float
-    ) -> list:
-
-    buffered_area = centroid.buffer(radius)
-    nearby_switches = []
-    with fiona.open("data/assets.gpkg", layer='Switch') as src:
-        for feature in src.filter(bbox=buffered_area.bounds):
-            if feature['properties']['Switch Type'] == 'Link Box':
-
-                # Get the geometry and ID of the switch
-                switch_centroid = shape(feature['geometry'])
-                switch_fid = feature['properties']['FID']
-                nearby_switches.append([switch_centroid, switch_fid])
-    return nearby_switches

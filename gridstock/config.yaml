@@ -91,6 +91,9 @@ create_ppnetwork:
   resistivity_of_al: 2.65e-8        # Ohm·m
   default_reactive_power: 0.0005    # MVAR
   lamp_post_load_size:
-    p_mw: 0.0001
+    p_mw: 0.001
+    q_mvar: 0.00005
+  default_load_size:
+    p_mw: 0.003
     q_mvar: 0.0005
 
