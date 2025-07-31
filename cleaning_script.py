@@ -104,18 +104,18 @@ from gridstock.creating_conn_new import creating_new_conn
 # create_lv_db()
 # print("done")
 
-# # Create the data base to store the results in.
-# # This will be called graph.sqlite.
-# # This will contain an incidence list and list of 
-# # node and edge properties
-# print("Creating new data base...")
-# create_graph_db()
-# print("done")
-
-# Create flux_lines.sqlite table 
-print("Creating flux_lines database...")
-create_station_flux_lines_table()
+# Create the data base to store the results in.
+# This will be called graph.sqlite.
+# This will contain an incidence list and list of 
+# node and edge properties
+print("Creating new data base...")
+create_graph_db()
 print("done")
+
+# # Create flux_lines.sqlite table 
+# print("Creating flux_lines database...")
+# create_station_flux_lines_table()
+# print("done")
 
 # # Pick a substation and find its initial edges
 # substation_fid = 11391343 # test substation

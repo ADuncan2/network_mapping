@@ -53,6 +53,13 @@ class DistributionNetwork:
         sub_point_wkb = dumps(sub_point)
         sub_data = (sub_point_wkb,)+sub_data[1:]
         
+        self.log_batch.add_log(logging.INFO, f"substation centroid: {sub_point}")
+        transformer = Transformer.from_crs("EPSG:27700", "EPSG:4277", always_xy=True)
+        longitude, latitude = transformer.transform(sub_point.x, sub_point.y)
+        #put it in a format that pandapower will understand
+        sub_coord = (latitude, longitude)
+        
+        net_data.substation_coord = sub_coord
         
         try:
             # Add substation to node_list
@@ -99,7 +106,7 @@ class DistributionNetwork:
 
         # # Get the number of nodes. This will be useful for checking against later
         # # to ensure that we don't accidentally add extra nodes
-        # num_nodes_after_node_initialisation = self.net.number_of_nodes()
+        num_nodes_after_node_initialisation = self.net.number_of_nodes()
 
         
         # Iterate over the edges in the incidence list
@@ -130,16 +137,49 @@ class DistributionNetwork:
                     cable_size=row[6]
                 )
         
-        # # Check that adding edges did not add extra nodes
-        # nodes_after_edges_added = self.net.number_of_nodes() 
-        # if  nodes_after_edges_added != num_nodes_after_node_initialisation:
-        #     print(f"num_of_nodes: {nodes_after_edges_added}")
-        #     print(f"initial_num_of_nodes: {num_nodes_after_node_initialisation}")
-        #     raise Warning("Spurious nodes added during edge creation.")
+        # Check that adding edges did not add extra nodes
+        nodes_after_edges_added = self.net.number_of_nodes() 
+        if  nodes_after_edges_added != num_nodes_after_node_initialisation:
+            # Now we have the networkx graph, we need to account for any missing nodes
+            # Now list the node fids in the net_data.node_list that are not in the networkx graph
+            node_fids_in_net_data = [node[0] for node in net_data.node_list]
+            nodes_in_net = list(self.net.nodes)
+            missing_nodes =  set(nodes_in_net) - set(node_fids_in_net_data) - {self.fid}  # Exclude the substation fid
+            self.log_batch.add_log(logging.WARNING, f"the missing nodes are: {missing_nodes}")
+
+            if len(missing_nodes) > 0:
+                self.log_batch.add_log(logging.WARNING, f"number of nodes after edges added ({nodes_after_edges_added}) does not match number of nodes after node initialisation ({num_nodes_after_node_initialisation}).")
+            
+                # Go through the missing nodes and adjust the net_data.incidence_list to skip them
+                # This is by linking the edges to the next node in the incidence list
+                relevant_rows = []
+                for node in missing_nodes:
+                    for row in net_data.incidence_list:
+                        edge_fid, node_to, node_from = row
+                        if node_to == node or node_from == node:
+                            relevant_rows.append(tuple(row))
+                            self.log_batch.add_log(logging.WARNING, f"incidence list of missing node: {row}")
+                
+                # Count how many unique rows there are in the relevant rows
+                unique_rows = set(relevant_rows)
+                
+                # If there are multiple rows, then we need to be careful about how we handle them
+                if len(unique_rows) > 1:
+                    self.log_batch.add_log(logging.WARNING, f"Multiple incidence rows found for missing node {node}. This may cause issues in the network graph. Skipping this node for now.")
+                elif len(unique_rows) == 1:
+                    # If there is only one row, then we can just skip it
+                    edge_fid, node_to, node_from = unique_rows.pop()
+                    # Remove the row from the incidence list
+                    net_data.incidence_list.remove([edge_fid, node_to, node_from])
+                    self.log_batch.add_log(logging.WARNING, f"Removed incidence row for missing node {node}: {(edge_fid, node_to, node_from)}")
+
         
         # Check the network for consistency and common errors and log the summary to the error log
         # And create list of lamp posts (nodes of degree 1 that are not service points or switches)
         self.check_net()
+        
+            
+
 
 
     def check_net(self) -> None:
@@ -421,7 +461,7 @@ class DistributionNetwork:
         
         self.check_for_bad_data()
         # # Run a power flow simulation
-        pp.runpp(self.ppnet, max_iteration=500, tolerance_mva=1e-6)
+        pp.runpp(self.ppnet, max_iteration=500, tolerance_mva=1e-6, numba=False)
         
         # Check if the power flow converged
         if not self.ppnet.converged:

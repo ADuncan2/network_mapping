@@ -60,6 +60,8 @@ class NetworkData:
         self.node_list = []
         self.edge_list = []
         self.summary_stats = {}
+        self.substation_fid = None
+        self.substation_coord = None
 
     def __str__(self) -> str:
         msg = f"""

@@ -277,10 +277,6 @@ def worker_single(args):
         
         ## Dump the logs into the log queue
         log_batch.finalize()
-
-        # Update summary_stats to show that mapping was successful
-        if hasattr(netdata, 'summary_stats'):
-            netdata.summary_stats['success'] = True
         
         
         return ('success', netdata, log_batch)
@@ -314,7 +310,7 @@ def main():
     print("Checking for previously mapped substations...")
     mapped_subs = get_mapped_substations_data()
     fids = [fid for fid in all_fids_list if fid not in mapped_subs]
-    fids = fids[246:274]
+    fids = fids[170:211]
 
     print(f"Total substations available: {len(all_fids_list)}")
     print(f"Already mapped: {len(mapped_subs)}")

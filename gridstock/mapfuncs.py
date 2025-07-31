@@ -705,6 +705,28 @@ def log_stats_of_dfs(
             )
         raise ValueError("No service points found in the network.")
 
+    
+    # # Extract FIDs from node_list and edge_list
+    # node_fids = {row[0] for row in net_data.node_list}
+    # edge_fids = {row[0] for row in net_data.edge_list}
+
+    # # Check if all FIDs in incidence_list are in node_list or edge_list
+    # consistency_check = True
+    # for row in net_data.incidence_list:
+    #     for fid in row:
+    #         if fid not in node_fids and fid not in edge_fids:
+    #             log_batch.add_log(
+    #                 logging.WARNING,
+    #                 f"Incidence list contains fid {fid} that is not in node_list or edge_list."
+    #                 )
+    #             consistency_check = False
+    
+    # if consistency_check:
+    #     log_batch.add_log(
+    #         logging.INFO,
+    #         "Incidence list is consistent with node_list and edge_list."
+    #         )
+
     # Log the stats of the DFS run
     log_batch.add_log(
         logging.INFO,
@@ -813,6 +835,7 @@ def map_substation(
         
     net_data.substation = substation_fid
 
+
     ## Check the net_data object to make sure it's consistent, and to allow comparison with later steps of mapping to make sure data is not being lost
     DFS_edge_length = log_stats_of_dfs(net_data, log_batch)
 
@@ -832,12 +855,13 @@ def map_substation(
     # Simulate the pandapower network to check it runs
     pnet.simulate_ppnetwork(config)
 
-    percent_difference = 1 - (pnet.pp_edge_length/DFS_edge_length  * 100) if DFS_edge_length != 0 else None
+    percent_difference = (1 - pnet.pp_edge_length/DFS_edge_length)  * 100 if DFS_edge_length != 0 else None
 
     ## Write summary statistics to a csv file
     summary_stats = {
         "substation_fid": substation_fid,
-        "success": None,
+        "substation_geom": net_data.substation_coord,
+        "Runs powerflow": any("converged" in log["message"] for log in log_batch.messages),
         "warnings_or_errors": any(log["level"] >= logging.WARNING for log in log_batch.messages),
         "service_points": len(pnet.service_points),
         "DFS_edge_length_km": DFS_edge_length,
