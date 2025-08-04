@@ -310,7 +310,7 @@ def main():
     print("Checking for previously mapped substations...")
     mapped_subs = get_mapped_substations_data()
     fids = [fid for fid in all_fids_list if fid not in mapped_subs]
-    fids = fids[170:211]
+    # fids = fids[170:211]
 
     print(f"Total substations available: {len(all_fids_list)}")
     print(f"Already mapped: {len(mapped_subs)}")

@@ -746,7 +746,7 @@ def map_substation(
         max_recursion_depth: int = 2000
         ) -> NetworkData:
 
-    connection_net = sqlite3.connect('data/network_data.sqlite')
+    connection_net = sqlite3.connect('data/network_data.sqlite', timeout=120)
     cursor_net = connection_net.cursor()
 
     # Find all edge connected to it
@@ -768,7 +768,7 @@ def map_substation(
     
 
     # Set up database connections
-    conn_lv_assets = sqlite3.connect('data/lv_assets.sqlite')
+    conn_lv_assets = sqlite3.connect('data/lv_assets.sqlite', timeout=120)
     cursor_lv_assets = conn_lv_assets.cursor()
 
     # Checks if a database already exists for this path. If it doesn't it creates one, if it does it resets it
@@ -779,8 +779,17 @@ def map_substation(
 
     connection_flux = sqlite3.connect(flux_db_path)
     cursor_flux = connection_flux.cursor()
-    connection_graph = sqlite3.connect('data/graph.sqlite')
+
+    
+    connection_graph = sqlite3.connect('data/graph.sqlite', timeout=120)
     cursor_graph = connection_graph.cursor()
+
+    # Check if graph.sqlite is in wal mode, and if it isn't then set it to wal mode
+    # This is to ensure that the database can handle concurrent writes and reads
+    journal_mode = cursor_graph.execute("PRAGMA journal_mode;").fetchone()[0]
+    if journal_mode.lower() != "wal":
+        cursor_graph.execute("PRAGMA journal_mode=WAL;")
+
 
     # Find the substation's geom
     cursor_lv_assets.execute(
