@@ -492,7 +492,7 @@ def DFS(
         # If it is a hyper edge
         elif len(joining_things) > 2:
             
-            # Added to ensure that further steps of DFS stop here if encountered again (ADAM)
+            # Added to ensure that further steps of DFS stop here if encountered again
             recorder.visited_edges.append(int(current_asset))
             
             target_string = str(current_asset)

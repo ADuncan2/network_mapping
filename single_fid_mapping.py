@@ -115,6 +115,8 @@ def log_writer(log_queue, result_queue, num_expected):
         'start_time': datetime.now(),
         'total_processing_time': timedelta()
     }
+
+    counter = 0
     
     while completed + failed < num_expected:
         log_processed = False
@@ -168,6 +170,18 @@ def log_writer(log_queue, result_queue, num_expected):
                 # Save network data to database
                 network_data.to_sql()
 
+                counter += 1
+                if counter % 10 == 0:
+                    # Checkpoint the WAL to reduce file size
+                    try:
+                        conn = sqlite3.connect("data/graph.sqlite", timeout=10)
+                        conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+                        conn.close()
+                    except Exception as ckpt_err:
+                        print(f"Checkpoint failed: {ckpt_err}")
+
+                time.sleep(0.5)  # Allow time for the checkpoint to complete
+
                 # If the network data has summary stats, save them as well
                 if hasattr(network_data, 'summary_stats'):
                     network_data.to_csv()
@@ -200,7 +214,7 @@ def log_writer(log_queue, result_queue, num_expected):
         # If neither queue had data, sleep briefly to avoid busy waiting
         if not log_processed and not result_processed:
             import time
-            time.sleep(0.01)
+            time.sleep(0.1)
     
     # Process any remaining log messages
     remaining_logs = True
