@@ -544,7 +544,10 @@ def create_graph_db() -> None:
     
     # connect to it
     connection = sqlite3.connect(file_path)
-    cursor = connection.cursor() 
+    cursor = connection.cursor()
+
+    # Enable WAL mode
+    cursor.execute("PRAGMA journal_mode=WAL;")
 
     cursor.execute(
         """
