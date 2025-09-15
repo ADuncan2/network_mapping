@@ -15,6 +15,7 @@ import os
 import re 
 from datetime import datetime
 from shapely import wkb
+import pandas as pd
 
 LINE_CLEAR = '\x1b[2K'
 
@@ -601,9 +602,19 @@ def clear_graph_db() -> None:
     finally:
         connection.close()
 
+def get_mapped_substations_ids_from_summary() -> set:
+    file_path = "data/summary.csv"
+    
+    df = pd.read_csv(file_path)
+    # Convert to numeric, forcing errors to NaN
+    fids = pd.to_numeric(df["substation_fid"], errors="coerce")
+    # Drop NaN and convert to int
+    valid_fids = fids.dropna().astype(int).tolist()
+    return valid_fids
 
 
-def get_mapped_substations_data() -> set:
+
+def get_mapped_substations_ids_from_database() -> set:
     file_path = "data/graph.sqlite"
     connection = sqlite3.connect(file_path)
     cursor = connection.cursor()
