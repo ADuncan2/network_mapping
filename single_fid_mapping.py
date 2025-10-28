@@ -1,7 +1,8 @@
 from gridstock.mapfuncs import *
 from gridstock.dbcleaning import (
     reset_station_flux_lines_table,
-    get_mapped_substations_ids_from_summary
+    get_mapped_substations_ids_from_summary,
+    get_mapped_substations_from_logs
 )
 from gridstock.plotting import plot_net_data
 from gridstock.recorder import NetworkData
@@ -322,13 +323,16 @@ def main():
 
     # Check which substations have already been mapped
     print("Checking for previously mapped substations...")
-    mapped_subs = get_mapped_substations_ids_from_summary()
+    mapped_subs = get_mapped_substations_from_logs()
+
+    print(f"Found {len(mapped_subs)} previously mapped substations from logs.")
+    #mapped_subs = get_mapped_substations_ids_from_summary()
     ## Remember, there is a different function (get_mapped_substations_ids_from_database) that checks graph.sqlite directly. 
     #This is useful if you've made significant changes to the mapping code and want to reprocess some substations that failed the first time round.
     # Otherwise, the summary table avoids mapping all the 1000+ substations that you know don't work each time you restart the process.
     
     fids = [fid for fid in all_fids_list if fid not in mapped_subs]
-    # fids = fids[170:211]
+    
 
     print(f"Total substations available: {len(all_fids_list)}")
     print(f"Already mapped: {len(mapped_subs)}")
@@ -340,7 +344,7 @@ def main():
         
 
     # Calculate number of workers
-    num_of_workers = min(cpu_count() - 1, len(fids), 8)  # Cap at 8 to avoid too many temp files
+    num_of_workers = min(cpu_count() - 1, len(fids), 10)  # Cap at 8 to avoid too many temp files
     print(f"Using {num_of_workers} worker processes")
 
     # Prepare arguments for pool workers

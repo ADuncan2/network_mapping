@@ -612,6 +612,24 @@ def get_mapped_substations_ids_from_summary() -> set:
     valid_fids = fids.dropna().astype(int).tolist()
     return valid_fids
 
+def get_mapped_substations_from_logs(log_dir="logs") -> set:
+    """
+    Scans all log.txt files in the given directory, extracts FIDs, 
+    and returns a list of unique FIDs as integers.
+    """
+    print("Scanning log files for mapped substations...")
+    fid_pattern = re.compile(r"FID:(\d+)")
+    fids = set()
+
+    for filename in os.listdir(log_dir):
+        if filename.endswith(".log"):
+            with open(os.path.join(log_dir, filename), "r", encoding="utf-8") as f:
+                for line in f:
+                    match = fid_pattern.search(line)
+                    if match:
+                        fids.add(int(match.group(1)))
+    print(f"Found {len(fids)} unique FIDs in log files.")
+    return fids
 
 
 def get_mapped_substations_ids_from_database() -> set:

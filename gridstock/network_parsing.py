@@ -36,6 +36,8 @@ class DistributionNetwork:
         self.fid = fid
         self.log_batch = log_batch
 
+
+
     def get_substation_networkx(self, net_data) -> None:
         """
         Function that reads the data stored in NetworkData and then creates
