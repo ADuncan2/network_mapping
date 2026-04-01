@@ -49,7 +49,7 @@ def get_substation_details(fid):
     }
 
 # Example usage
-fid = 11390319
+fid = 11375047
 substation_info = get_substation_details(fid)
 print(f"Coordinates: {substation_info['latitude']}, {substation_info['longitude']}")
 print(f"Connected objects: {substation_info['connected_objects']}")

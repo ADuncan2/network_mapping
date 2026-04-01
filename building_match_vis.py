@@ -2,11 +2,10 @@ import os
 import pandas as pd
 import geopandas as gpd
 from shapely import from_wkb
-from shapely.geometry import Point, box
+from shapely.geometry import Point, box, LineString, Polygon, MultiPolygon
 import matplotlib.pyplot as plt
 import contextily as cx
 from typing import Union
-from shapely.geometry import LineString, Point
 from gridstock.network_parsing_EEA import DistributionNetwork
 import networkx as nx
 import sys
@@ -18,7 +17,8 @@ import multiprocessing as mp
 from pathlib import Path
 from tqdm import tqdm
 
-def get_building_geom(buffered, buildings_path="data/enwl_buildings_activity.parquet", buffer_scale=1.1):
+
+def get_building_geom(buffered, buildings_path="data/all_buildings_in_enwl_27700.parquet", buffer_scale=1.1):
     """
     Given a network GeoDataFrame or NetworkX graph with geometry attributes,
     finds the outer boundary of the network, buffers it out by a percentage,
@@ -46,7 +46,7 @@ def get_building_geom(buffered, buildings_path="data/enwl_buildings_activity.par
 
     # --- 3️⃣ Read buildings only within bounding box of buffered area ---
     minx, miny, maxx, maxy = buffered.bounds
-    buildings = gpd.read_parquet(buildings_path, columns=["toid", "activity", "premises_rows", "geometry"])
+    buildings = gpd.read_parquet(buildings_path, columns=["uprn", "toid", "activity_type","activity_type_2", "geometry"])
     buildings = buildings.cx[minx:maxx, miny:maxy]  # bbox crop
 
     # --- 4️⃣ Filter precisely to those within the buffer ---
@@ -336,17 +336,41 @@ def plot_network_on_map(network, substation_fid=None, building_geoms=None, crs="
     building_traces = []
     if building_geoms is not None and not building_geoms.empty:
         activity_colors = {
-            "domestic": "green",
-            "non-domestic": "orange",
-            "no address": "purple",
-            "mixed": "cyan",
-            "unknown": "gray"
+            "AG": "forestgreen",         # Agriculture, Countryside, Animals
+            "AR": "mediumpurple",        # Arts and Leisure
+            "CO": "teal",                # Community
+            "DO": "saddlebrown",           # Domestic
+            "ED": "royalblue",           # Education
+            "EM": "red",                 # Emergency
+            "FA": "lightgray",         # Factory
+            "HE": "darkorange",          # Health
+            "HO": "gold",                # Hospitality
+            "MI": "gray",                # Miscellaneous
+            "MO": "darkslateblue",       # MoD
+            "OF": "deepskyblue",         # Office
+            "SH": "hotpink",             # Shop
+            "SP": "limegreen",           # Sport
+            "TR": "darkturquoise",       # Transport
+            "UNCODED": "black",          # UNCODED
+            "UT": "olive",               # Utilities
+            "WA": "chocolate"            # Warehouse
         }
 
-        building_geoms["color"] = building_geoms["activity"].map(activity_colors).fillna("gray")
+
+        building_geoms["color"] = building_geoms["activity_type"].map(activity_colors).fillna("gray")
+        
+        def multipolygon_to_polygon(geom):
+            if isinstance(geom, Polygon):
+                return geom
+            if isinstance(geom, MultiPolygon):
+                return max(geom.geoms, key=lambda p: p.area)
+            return None
+
+        # Reformat building geometries for plotting
+        building_geoms["geometry"] = building_geoms["geometry"].apply(multipolygon_to_polygon)
 
         for activity, color in activity_colors.items():
-            activity_buildings = building_geoms[building_geoms["activity"] == activity]
+            activity_buildings = building_geoms[building_geoms["activity_type"] == activity]
             
             if activity_buildings.empty:
                 continue
@@ -357,13 +381,15 @@ def plot_network_on_map(network, substation_fid=None, building_geoms=None, crs="
             
             for idx, row in activity_buildings.iterrows():
                 geom = row.geometry
+
+                # print(f"Building {idx} geometry type: {geom.geom_type}")
                 
                 if geom.geom_type == 'Polygon':
                     coords = list(geom.exterior.coords)
                     lons, lats = zip(*coords)
                     lons_all.extend(list(lons) + [None])  # None creates a break
                     lats_all.extend(list(lats) + [None])
-                    hovertexts.extend([row["premises_rows"]] + [None])
+                    hovertexts.extend([f"TOID: {row['toid']}<br>Activity: {row['activity_type']}"]+ [None])
             
             if lons_all:
                 building_traces.append(
@@ -380,6 +406,7 @@ def plot_network_on_map(network, substation_fid=None, building_geoms=None, crs="
                         showlegend=True
                     )
                 )
+
 
     # --- Combine all traces ---
     fig = go.Figure( building_traces + edge_traces + [node_trace])
@@ -406,7 +433,7 @@ def plot_network_on_map(network, substation_fid=None, building_geoms=None, crs="
 # 11375012 - 136 mostly domestic but with example of school building with no address
 # 11375080 - large-ish network with loads of obviously domestic buildings as no address
 
-fid = 11378262
+fid = 11374884
  
 sql_fname = "data/graph.sqlite" 
 
@@ -414,7 +441,7 @@ network = DistributionNetwork()
 network.get_substation_networkx(fid, sql_fname) 
 print("Substation networkx graph obtained.") 
 
-building_geoms, buffer_outline = get_buildings_near_fid(network, fid, buffer_scale=1.7) 
+building_geoms, buffer_outline = get_buildings_near_fid(network, fid, buffer_scale=2.5) 
 
 # sp_to_building_match = match_buildings_to_network(network, building_geoms) 
 

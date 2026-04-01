@@ -18,7 +18,8 @@ import multiprocessing as mp
 from pathlib import Path
 from tqdm import tqdm
 
-def get_building_geom(buffered, buildings_path="data/enwl_buildings_activity.parquet", buffer_scale=1.1):
+
+def get_building_geom(buffered, buildings_path="data/all_buildings_in_enwl_27700.parquet", buffer_scale=1.1):
     """
     Given a network GeoDataFrame or NetworkX graph with geometry attributes,
     finds the outer boundary of the network, buffers it out by a percentage,
@@ -46,7 +47,7 @@ def get_building_geom(buffered, buildings_path="data/enwl_buildings_activity.par
 
     # --- 3️⃣ Read buildings only within bounding box of buffered area ---
     minx, miny, maxx, maxy = buffered.bounds
-    buildings = gpd.read_parquet(buildings_path, columns=["toid", "activity", "premises_rows", "geometry"])
+    buildings = gpd.read_parquet(buildings_path, columns=["uprn", "toid", "activity_type","activity_type_2", "geometry"])
     buildings = buildings.cx[minx:maxx, miny:maxy]  # bbox crop
 
     # --- 4️⃣ Filter precisely to those within the buffer ---
@@ -132,7 +133,7 @@ def get_buildings_near_fid(
 
 
 
-def match_buildings_to_network(network, building_geoms, buffer_dist=5.0, nearest_dist=10.0):
+def match_buildings_to_network(network, building_geoms, buffer_dist=1.0, nearest_dist=10.0):
     """
     Match building geometries to service point nodes in the network.
 
@@ -169,18 +170,31 @@ def match_buildings_to_network(network, building_geoms, buffer_dist=5.0, nearest
     buildings = buildings[buildings.geometry.notnull()].reset_index(drop=True)
     buildings["building_id"] = buildings.index
 
+    ## How many unique toids are there?
+    print("Uprns:")
+    print(len(buildings["uprn"].unique()))
+
+    ## How many unique uprns?
+    print("Toids:")
+    print(len(buildings["toid"].unique()))
+
+    ## How many unique nodes are there?
+    print("Service point nodes:")
+    print(len(gdf_nodes["node_id"].unique()))
+
     # --- Test 1: Nodes overlapping buildings ---
-    overlap_join = gpd.sjoin(gdf_nodes, buildings, predicate="intersects", how="left")
+    overlap_join = gpd.sjoin(buildings, gdf_nodes, predicate="intersects", how="left")
     mapped_overlap = overlap_join[~overlap_join["building_id"].isna()].copy()
     mapped_overlap["match_method"] = "overlap"
 
     mapped_nodes = mapped_overlap.drop_duplicates("node_id").copy()
     unmapped_nodes = gdf_nodes.loc[~gdf_nodes["node_id"].isin(mapped_nodes["node_id"])].copy()
+    print(f"After overlap test: {len(mapped_nodes)} matched, {len(unmapped_nodes)} unmatched.")
 
     # filter out buildings already matched
     buildings = buildings[~buildings["building_id"].isin(mapped_nodes["building_id"])].copy()
 
-    # --- Test 2: Buffered overlap (1m buffer) ---
+    # --- Test 2: Buffered overlap (variable buffer distance) ---
     if not unmapped_nodes.empty:
         buffered = unmapped_nodes.copy()
         buffered["geometry"] = buffered.buffer(buffer_dist)
@@ -194,56 +208,25 @@ def match_buildings_to_network(network, building_geoms, buffer_dist=5.0, nearest
 
         mapped_nodes = pd.concat([mapped_nodes, single_match], ignore_index=True)
         unmapped_nodes = gdf_nodes.loc[~gdf_nodes["node_id"].isin(mapped_nodes["node_id"])].copy()
-
-    # --- Test 3: Nearest building edge within threshold ---
-    if not unmapped_nodes.empty:
-        # Ensure both are in same CRS
-        unmapped_nodes = unmapped_nodes.to_crs(buildings.crs)
-
-        # Compute distance from each service point to the nearest building *edge*
-        # shapely's .distance() already measures to polygon boundaries
-        distances = []
-        nearest_building_ids = []
-
-        for _, node_row in unmapped_nodes.iterrows():
-            node_point = node_row.geometry
-            # Compute distances to all building edges
-            building_distances = buildings.geometry.distance(node_point)
-            min_idx = building_distances.idxmin()
-            min_dist = building_distances[min_idx]
-
-            distances.append(min_dist)
-            nearest_building_ids.append(buildings.loc[min_idx, "building_id"])
-
-        # Add distance results
-        unmapped_nodes["nearest_building_id"] = nearest_building_ids
-        unmapped_nodes["dist_to_building"] = distances
-
-        # Filter matches within threshold (e.g. 10 m)
-        nearest_match = unmapped_nodes[unmapped_nodes["dist_to_building"] <= nearest_dist].copy()
-        nearest_match["match_method"] = "nearest_edge_within_10m"
-
-        # Merge building attributes if desired
-        nearest_match = nearest_match.merge(
-            buildings[["building_id", "geometry"]],
-            left_on="nearest_building_id",
-            right_on="building_id",
-            how="left",
-            suffixes=("_node", "_building")
-        )
-
-        # Update mapped/unmapped
-        mapped_nodes = pd.concat([mapped_nodes, nearest_match], ignore_index=True)
-        unmapped_nodes = gdf_nodes.loc[~gdf_nodes["node_id"].isin(mapped_nodes["node_id"])].copy()
+        print(f"After buffered overlap test: {len(mapped_nodes)} matched, {len(unmapped_nodes)} unmatched.")
 
     # print(f"Matched {len(mapped_nodes)} / {len(gdf_nodes)} nodes.")
     # print(f"Remaining unmatched: {len(unmapped_nodes)}")
 
     # print("Match methods distribution:")
     # print(mapped_nodes["match_method"].value_counts())
+    print("Mapped nodes preview:")
+    print(mapped_nodes.head())
+
+    ## How many rows are there in matched buildings?
+    
+
 
     ## Clean up mapped_nodes GeoDataFrame for saving/returning
-    mapped_nodes_saving = mapped_nodes[["node_id","toid", "match_method","dist_to_building", "activity","premises_rows"]].copy()
+    mapped_nodes_saving = mapped_nodes.copy()
+
+    print("Unmapped nodes preview:")
+    print(unmapped_nodes.head())
 
     # Add unmapped node details 
     unmapped_nodes["toid"] = None
@@ -265,137 +248,137 @@ def match_buildings_to_network(network, building_geoms, buffer_dist=5.0, nearest
 
 
 
+def plot_network_on_map(network, substation_fid=None, building_geoms=None, crs="EPSG:4326"):
+    """
+    Interactive Plotly map of the LV network and related assets (uses go.Scattermap).
+    """
+    G = network.net
+    fid = substation_fid if substation_fid is not None else "Network"
 
-# def plot_network_on_map(network, substation_fid=None, building_geoms=None, crs="EPSG:4326"):
-#     """
-#     Interactive Plotly map of the LV network and related assets (uses go.Scattermap).
-#     """
-#     G = network.net
+    # --- Extract geometries from network ---
+    node_records, edge_records = [], []
+    for n, data in G.nodes(data=True):
+        geom = from_wkb(data.get("geometry"))
+        if isinstance(geom, Point):
+            node_records.append({"node": n,"node_type": data.get("asset_type") , "geometry": geom})
+    for u, v, data in G.edges(data=True):
+        geom = from_wkb(data.get("geometry"))
+        if isinstance(geom, LineString):
+            edge_records.append({"u": u, "v": v, "geometry": geom})
 
-#     # --- Extract geometries from network ---
-#     node_records, edge_records = [], []
-#     for n, data in G.nodes(data=True):
-#         geom = from_wkb(data.get("geometry"))
-#         if isinstance(geom, Point):
-#             node_records.append({"node": n,"node_type": data.get("asset_type") , "geometry": geom})
-#     for u, v, data in G.edges(data=True):
-#         geom = from_wkb(data.get("geometry"))
-#         if isinstance(geom, LineString):
-#             edge_records.append({"u": u, "v": v, "geometry": geom})
+    gdf_nodes = gpd.GeoDataFrame(node_records, crs=crs)
+    gdf_edges = gpd.GeoDataFrame(edge_records, crs=crs)
 
-#     gdf_nodes = gpd.GeoDataFrame(node_records, crs=crs)
-#     gdf_edges = gpd.GeoDataFrame(edge_records, crs=crs)
+    # --- Ensure all geometries are lat/lon ---
+    gdf_nodes = gdf_nodes.to_crs(epsg=4326)
+    gdf_edges = gdf_edges.to_crs(epsg=4326)
+    if building_geoms is not None and not building_geoms.empty:
+        building_geoms = building_geoms.to_crs(epsg=4326)
 
-#     # --- Ensure all geometries are lat/lon ---
-#     gdf_nodes = gdf_nodes.to_crs(epsg=4326)
-#     gdf_edges = gdf_edges.to_crs(epsg=4326)
-#     if building_geoms is not None and not building_geoms.empty:
-#         building_geoms = building_geoms.to_crs(epsg=4326)
+    # --- Build edge traces ---
+    edge_traces = []
+    first_edge = True  # Flag to show legend only once
 
-#     # --- Build edge traces ---
-#     edge_traces = []
-#     first_edge = True  # Flag to show legend only once
+    for _, row in gdf_edges.iterrows():
+        geom = row.geometry
+        if geom is None:
+            continue
+        if geom.geom_type == "MultiLineString":
+            lines = geom.geoms
+        else:
+            lines = [geom]
 
-#     for _, row in gdf_edges.iterrows():
-#         geom = row.geometry
-#         if geom is None:
-#             continue
-#         if geom.geom_type == "MultiLineString":
-#             lines = geom.geoms
-#         else:
-#             lines = [geom]
+        for line in lines:
+            lons, lats = line.xy
+            edge_traces.append(
+                go.Scattermap(
+                    lon=list(lons),
+                    lat=list(lats),
+                    mode="lines",
+                    line=dict(width=2, color="blue"),
+                    hoverinfo="none",
+                    name="Lines",
+                    showlegend=first_edge,  # Only show legend for first trace
+                    legendgroup="edges"  # Group all edges together
+                )
+            )
+            first_edge = False  # Set to False after first trace
 
-#         for line in lines:
-#             lons, lats = line.xy
-#             edge_traces.append(
-#                 go.Scattermap(
-#                     lon=list(lons),
-#                     lat=list(lats),
-#                     mode="lines",
-#                     line=dict(width=2, color="blue"),
-#                     hoverinfo="none",
-#                     name="Lines",
-#                     showlegend=first_edge,  # Only show legend for first trace
-#                     legendgroup="edges"  # Group all edges together
-#                 )
-#             )
-#             first_edge = False  # Set to False after first trace
+    # --- Build node trace ---
+    node_trace = go.Scattermap(
+        lon=gdf_nodes.geometry.x,
+        lat=gdf_nodes.geometry.y,
+        mode="markers",
+        marker=dict(size=8, color= "red"),
+        text=gdf_nodes.apply(lambda row: f"Node: {row['node']}<br>Type: {row['node_type']}", axis=1),
+        hoverinfo="text",
+        name="Nodes"
+    )
 
-#     # --- Build node trace ---
-#     node_trace = go.Scattermap(
-#         lon=gdf_nodes.geometry.x,
-#         lat=gdf_nodes.geometry.y,
-#         mode="markers",
-#         marker=dict(size=8, color= "red"),
-#         text=gdf_nodes.apply(lambda row: f"Node: {row['node']}<br>Type: {row['node_type']}", axis=1),
-#         hoverinfo="text",
-#         name="Nodes"
-#     )
+    # --- Add buildings (if provided) ---
+    building_traces = []
+    if building_geoms is not None and not building_geoms.empty:
+        activity_colors = {
+            "domestic": "green",
+            "non-domestic": "orange",
+            "no address": "purple",
+            "mixed": "cyan",
+            "unknown": "gray"
+        }
 
-#     # --- Add buildings (if provided) ---
-#     building_traces = []
-#     if building_geoms is not None and not building_geoms.empty:
-#         activity_colors = {
-#             "domestic": "green",
-#             "non-domestic": "orange",
-#             "no address": "purple",
-#             "mixed": "cyan",
-#             "unknown": "gray"
-#         }
+        building_geoms["color"] = building_geoms["activity"].map(activity_colors).fillna("gray")
 
-#         building_geoms["color"] = building_geoms["activity"].map(activity_colors).fillna("gray")
-
-#         for activity, color in activity_colors.items():
-#             activity_buildings = building_geoms[building_geoms["activity"] == activity]
+        for activity, color in activity_colors.items():
+            activity_buildings = building_geoms[building_geoms["activity"] == activity]
             
-#             if activity_buildings.empty:
-#                 continue
+            if activity_buildings.empty:
+                continue
             
-#             lons_all = []
-#             lats_all = []
-#             hovertexts = []
+            lons_all = []
+            lats_all = []
+            hovertexts = []
             
-#             for idx, row in activity_buildings.iterrows():
-#                 geom = row.geometry
+            for idx, row in activity_buildings.iterrows():
+                geom = row.geometry
                 
-#                 if geom.geom_type == 'Polygon':
-#                     coords = list(geom.exterior.coords)
-#                     lons, lats = zip(*coords)
-#                     lons_all.extend(list(lons) + [None])  # None creates a break
-#                     lats_all.extend(list(lats) + [None])
-#                     hovertexts.extend([row["premises_rows"]] + [None])
+                if geom.geom_type == 'Polygon':
+                    coords = list(geom.exterior.coords)
+                    lons, lats = zip(*coords)
+                    lons_all.extend(list(lons) + [None])  # None creates a break
+                    lats_all.extend(list(lats) + [None])
+                    hovertexts.extend([row["premises_rows"]] + [None])
             
-#             if lons_all:
-#                 building_traces.append(
-#                     go.Scattermap(
-#                         lon=lons_all,
-#                         lat=lats_all,
-#                         mode="lines",
-#                         line=dict(width=1, color="black"),
-#                         fill="toself",
-#                         fillcolor=color,
-#                         opacity=0.8,
-#                         hovertext=hovertexts,
-#                         name=activity,
-#                         showlegend=True
-#                     )
-#                 )
+            if lons_all:
+                building_traces.append(
+                    go.Scattermap(
+                        lon=lons_all,
+                        lat=lats_all,
+                        mode="lines",
+                        line=dict(width=1, color="black"),
+                        fill="toself",
+                        fillcolor=color,
+                        opacity=0.8,
+                        hovertext=hovertexts,
+                        name=activity,
+                        showlegend=True
+                    )
+                )
 
-#     # --- Combine all traces ---
-#     fig = go.Figure( building_traces + edge_traces + [node_trace])
+    # --- Combine all traces ---
+    fig = go.Figure( building_traces + edge_traces + [node_trace])
 
-#     # --- Layout ---
-#     fig.update_layout(
-#         map=dict(
-#             style="open-street-map",
-#             center=dict(lat=gdf_nodes.geometry.y.mean(), lon=gdf_nodes.geometry.x.mean()),
-#             zoom=15
-#         ),
-#         title=f"Network Map: {fid}",
-#         legend=dict(title="Legend", bgcolor="rgba(255,255,255,0.8)")
-#     )
+    # --- Layout ---
+    fig.update_layout(
+        map=dict(
+            style="open-street-map",
+            center=dict(lat=gdf_nodes.geometry.y.mean(), lon=gdf_nodes.geometry.x.mean()),
+            zoom=15
+        ),
+        title=f"Network Map: {fid}",
+        legend=dict(title="Legend", bgcolor="rgba(255,255,255,0.8)")
+    )
 
-#     fig.show()
+    fig.show()
 
 
 
@@ -421,12 +404,12 @@ def process_fid(fid, sql_fname="data/graph.sqlite"):
         print(f"Substation {fid}: network obtained.", flush=True)
 
         building_geoms, buffer_outline = get_buildings_near_fid(network, fid, buffer_scale=1.7)
+        print(f"Substation {fid}: {len(building_geoms)} buildings found near network.", flush=True)
 
-        sp_to_building_match = match_buildings_to_network(network, building_geoms)
-        sp_to_building_match["substation_fid"] = fid
+        match_buildings_to_network(network, building_geoms)
+        print(f"Substation {fid}: building matching complete.", flush=True)
 
-        out_path = Path(f"data/service_points_to_buildings/sp_to_building_match_{fid}.csv")
-        sp_to_building_match.to_csv(out_path, index=False)
+        # plot_network_on_map(network, substation_fid=fid, building_geoms=building_geoms)
 
         elapsed = time.time() - time_start
         return {"fid": fid, "status": "success", "time": elapsed}
@@ -467,30 +450,32 @@ def process_fid_wrapper(args):
 
 def main():
     # --- Load substation FIDs ---
+    # These are the FIDs of all the substations that appear in graph.sqlite
     summary_path = Path("data/summary.csv")
-    all_fids = pd.read_csv(summary_path)["substation_fid"].unique().tolist()
+    # Load all summary FIDs where column 'warnings_or_errors' is False
+    summary_df = pd.read_csv(summary_path)
 
-    # --- Filter already mapped ---
-    mapped_dir = Path("data/service_points_to_buildings")
-    mapped_fids = {
-        int(f.stem.split("_")[-1])
-        for f in mapped_dir.glob("sp_to_building_match_*.csv")
-    }
+    all_fids = summary_df["substation_fid"].astype(str).tolist()
 
-    remaining_fids = [fid for fid in all_fids if fid not in mapped_fids]
-    print(f" {len(remaining_fids)} substations to process (skipping {len(mapped_fids)}).")
 
-    # --- Run parallel mapping ---
-    results = run_parallel(remaining_fids, sql_fname="data/graph.sqlite")
+
+    # # # --- Run parallel mapping ---
+    # # results = run_parallel(remaining_fids, sql_fname="data/graph.sqlite")
+
+    # # --- Or run serially for debugging ---
+    fid = all_fids[5]
+    results = process_fid(fid, sql_fname="data/graph.sqlite")
+
+
 
     # --- Save summary ---
-    results_df = pd.DataFrame(results)
-    results_df.to_csv("data/mapping_summary.csv", index=False)
-    print("Mapping complete. Summary saved to data/mapping_summary.csv")
+    # results_df = pd.DataFrame(results)
+    # results_df.to_csv("data/mapping_summary.csv", index=False)
+    # print("Mapping complete. Summary saved to data/mapping_summary.csv")
 
 
 if __name__ == "__main__":
     # Windows needs this guard for multiprocessing to work properly
-    mp.freeze_support()
+    # mp.freeze_support()
     main()
 
