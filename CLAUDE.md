@@ -72,3 +72,9 @@ poetry run python building_match_vis.py
 - Some substations crash the mapper and are excluded via `problem_subs` list in `single_fid_mapping.py`.
 - `building_matching.py` and `building_match_vis.py` have diverged — `building_match_vis.py` has a 3rd matching pass (nearest edge within 10m) that `building_matching.py` lacks.
 - The recursion limit is set to 5000 in `mapfuncs.py` for DFS.
+
+## Obsidian Permissions
+
+- You MAY use the Write tool to create new notes in: `C:\Users\ucbvaad\Documents\My notes vault\Work notes\Claude notes\`
+- You MAY NOT edit, move, or delete existing vault notes
+- When creating notes, use the work note template style from the vault
