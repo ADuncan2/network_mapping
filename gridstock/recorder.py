@@ -54,8 +54,8 @@ class NetworkData:
         self.substation = None
         self.switch = None
         self.substation_geom = None
-        self.visited_edges = []
-        self.visited_nodes = []
+        self.visited_edges = set()
+        self.visited_nodes = set()
         self.incidence_list = []
         self.node_list = []
         self.edge_list = []
@@ -118,9 +118,7 @@ class NetworkData:
         if len(self.edge_list) > 1:
         
             connection = sqlite3.connect(fname)
-            cursor = connection.cursor() 
-            connection_lv = sqlite3.connect("data/lv_assets.sqlite")
-            cursor_lv = connection_lv.cursor()
+            cursor = connection.cursor()
 
             if self.substation != None:
                 parent_substation = int(self.substation)
@@ -144,35 +142,38 @@ class NetworkData:
                     pass
 
             # Now need to insert into edge_list by copying from self.edge_list
+            # Insert edges — use slicing to get first 13 columns (fid..Switch_Status)
+            # which match the graph.sqlite schema, regardless of how many columns
+            # lv_assets has (currently 20)
             for entry in self.edge_list:
-                fid, wkb_geom, asset_type, voltage, material, conductors_per_phase, cable_size, insulation, install_date, phases_connected, sleeve_type, associated_cable, switch_status, is_substation, is_switch, cat = entry
-                #print(fid)
                 try:
-                    cursor.execute('INSERT INTO edge_list (fid, Geometry, Asset_Type, Voltage, Material, Conductors_Per_Phase, Cable_Size, Insulation, Installation_Date, Phases_Connected, Sleeve_Type, Associated_Cable, Switch_Status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (fid, wkb_geom, asset_type, voltage, material, conductors_per_phase, cable_size, insulation, install_date, phases_connected, sleeve_type, associated_cable, switch_status))
-                    #print(fid)
-                except sqlite3.Error as e:
-                    #print("SQLite Error:", e)
-                    #print("Error saving node to node_list in graph.sql")
+                    cursor.execute(
+                        'INSERT INTO edge_list (fid, Geometry, Asset_Type, Voltage, '
+                        'Material, Conductors_Per_Phase, Cable_Size, Insulation, '
+                        'Installation_Date, Phases_Connected, Sleeve_Type, '
+                        'Associated_Cable, Switch_Status) '
+                        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                        entry[:13])
+                except sqlite3.Error:
                     pass
-                
-                connection.commit()
 
-            # Now need to insert into node_list by copying from self.node_list
+            # Insert nodes — same first-13-columns approach
             for entry in self.node_list:
-                fid, wkb_geom, asset_type, voltage, material, conductors_per_phase, cable_size, insulation, install_date, phases_connected, sleeve_type, associated_cable, switch_status, is_substation, is_switch, cat = entry
-
                 try:
-                    cursor.execute('INSERT INTO node_list (fid, Geometry, Asset_Type, Voltage, Material, Conductors_Per_Phase, Cable_Size, Insulation, Installation_Date, Phases_Connected, Sleeve_Type, Associated_Cable, Switch_Status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (fid, wkb_geom, asset_type, voltage, material, conductors_per_phase, cable_size, insulation, install_date, phases_connected, sleeve_type, associated_cable, switch_status))
-                except sqlite3.IntegrityError as e:
-                    #print("error saving node to node_list in graph.sql")
-                    #print("IntegrityError:", e)
+                    cursor.execute(
+                        'INSERT INTO node_list (fid, Geometry, Asset_Type, Voltage, '
+                        'Material, Conductors_Per_Phase, Cable_Size, Insulation, '
+                        'Installation_Date, Phases_Connected, Sleeve_Type, '
+                        'Associated_Cable, Switch_Status) '
+                        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                        entry[:13])
+                except sqlite3.IntegrityError:
                     pass
-                connection.commit()
+
+            connection.commit()
 
             cursor.close()
             connection.close()
-            cursor_lv.close()
-            connection_lv.close()
 
     def to_csv(self, fname: str = "data/summary.csv") -> None:
         """

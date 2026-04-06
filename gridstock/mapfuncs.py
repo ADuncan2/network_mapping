@@ -27,6 +27,38 @@ from gridstock.dbcleaning import (
     create_station_flux_lines_table)
 import logging
 import csv
+import time
+import tracemalloc
+from dataclasses import dataclass, field
+
+
+@dataclass
+class DFSStats:
+    """Lightweight counters tracked during DFS traversal."""
+    total_calls: int = 0
+    node_calls: int = 0
+    edge_calls: int = 0
+    hyper_edge_calls: int = 0
+    hyper_edge_branching: list = field(default_factory=list)
+    max_depth_seen: int = 0
+    depth_limit_hits: int = 0
+    redundant_node_visits: int = 0
+    redundant_edge_visits: int = 0
+    both_nodes_visited: int = 0
+    flux_returns: int = 0
+    substation_returns: int = 0
+    started_at: float = 0.0
+    peak_memory_mb: float = 0.0
+
+
+class DFSBudgetExceeded(Exception):
+    """Raised when DFS exceeds call count or time budget."""
+    def __init__(self, stats: DFSStats):
+        self.stats = stats
+        super().__init__(
+            f"DFS budget exceeded: {stats.total_calls} calls, "
+            f"{time.perf_counter() - stats.started_at:.1f}s elapsed"
+        )
 
 
 def interpolate_coordinates(coordinates, num_new_points):
@@ -106,16 +138,17 @@ def check_point_distances(points, threshold):
         return points
             
 
-def finding_insert_indices(coordinates, points):
+def finding_insert_indices(coordinates, points, _depth=0):
+    # Guard: max 3 interpolation rounds (5^3 = 125x coordinate growth)
+    # or 50K coordinates — whichever comes first
+    bail_out = _depth > 3 or len(coordinates) > 50_000
+
     insert_indices = dict()
     count = 0
     for fid, geom in points.items():
         if geom.geom_type == "Polygon":
-            #print("ITS A POLYGON!! FUCK!!!")
             central_point = shape(geom).centroid
-            #print(f"central_point:{central_point}, central coords: {central_point.coords[0]}")
             coordinates[0] = central_point.coords[0]
-            
             insert_indices[0] = fid
         else:
             min_distance = float('inf')
@@ -125,20 +158,15 @@ def finding_insert_indices(coordinates, points):
                 if distance < min_distance:
                     min_distance = distance
                     closest_index = i
-            #print(closest_index)
             coordinates[closest_index] = geom.coords[0]
             insert_indices[closest_index] = fid
             count = count + 1
-    #print(f"insert_ind:{len(insert_indices)}, points:{len(points)}")
-    #print(coordinates)
-    if len(insert_indices)<len(points):
-        coordinates_new = interpolate_coordinates(coordinates,5)
-        #print(points)
-        #print("interpolated!")
-        return(finding_insert_indices(coordinates_new, points))
 
+    if len(insert_indices) < len(points) and not bail_out:
+        coordinates_new = interpolate_coordinates(coordinates, 5)
+        return finding_insert_indices(coordinates_new, points, _depth + 1)
     else:
-        return(insert_indices,coordinates)
+        return (insert_indices, coordinates)
 
 def add_points_and_divide_linestring(
         linestring: LineString,
@@ -248,31 +276,74 @@ def add_points_and_divide_linestring(
 
 def DFS(
         recorder: NetworkData,
-        log_batch, 
+        log_batch,
         current_asset: str,
         cursor_conn: sqlite3.Cursor,
         cursor_lv_assets: sqlite3.Cursor,
         cursor_flux: sqlite3.Cursor,
-        cursor_graph: sqlite3.Cursor,
         connection_flux: sqlite3.Connection,
         recursion_depth: int,
         max_recursion_depth: int = 5,
         hyper_edges: list = None,
+        stats: DFSStats = None,
+        verbose: bool = False,
     ) -> None:
     """
     Recursive function to implement a custom
-    depth first search to discover all assets 
+    depth first search to discover all assets
     downstream of a secondary substation.
     """
     if hyper_edges is None:
         hyper_edges = []
 
-    
+    # Initialise stats on first call
+    if stats is None:
+        stats = DFSStats()
+        stats.started_at = time.perf_counter()
+
+    # Track calls and check budget
+    stats.total_calls += 1
+    if recursion_depth > stats.max_depth_seen:
+        stats.max_depth_seen = recursion_depth
+
+    if stats.total_calls > 50_000:
+        if verbose:
+            elapsed = time.perf_counter() - stats.started_at
+            print(f"  BUDGET EXCEEDED: {stats.total_calls} calls, {elapsed:.1f}s, "
+                  f"{stats.hyper_edge_calls} hyper edges, "
+                  f"{stats.redundant_node_visits} redundant nodes", flush=True)
+        raise DFSBudgetExceeded(stats)
+    if stats.total_calls % 100 == 0:
+        elapsed = time.perf_counter() - stats.started_at
+        if elapsed > 120:
+            if verbose:
+                print(f"  BUDGET EXCEEDED: {stats.total_calls} calls, {elapsed:.1f}s, "
+                      f"{stats.hyper_edge_calls} hyper edges", flush=True)
+            raise DFSBudgetExceeded(stats)
+        try:
+            _, peak = tracemalloc.get_traced_memory()
+            stats.peak_memory_mb = max(stats.peak_memory_mb, peak / 1024 / 1024)
+        except RuntimeError:
+            pass  # tracemalloc not started — skip
+        if verbose:
+            print(f"[{stats.total_calls:>5d}] d={recursion_depth:>4d}  "
+                  f"nodes={len(recorder.visited_nodes):>5d}  "
+                  f"edges={len(recorder.visited_edges):>5d}  "
+                  f"hyper={stats.hyper_edge_calls:>4d}  "
+                  f"t={elapsed:.1f}s", flush=True)
+
     recursion_depth += 1
     if max_recursion_depth:
         if recursion_depth > max_recursion_depth:
+            stats.depth_limit_hits += 1
+            if verbose and stats.depth_limit_hits <= 5:
+                print(f"  DEPTH LIMIT at depth={recursion_depth}  fid={current_asset}", flush=True)
             log_batch.add_log(logging.WARNING, "Maximum recursion depth reached")
             return
+
+    # Guard against None assets (can arise from incomplete hyper edge division)
+    if current_asset is None:
+        return
 
     # Query the conn table for all connections to this asset
     cursor_conn.execute(
@@ -302,6 +373,15 @@ def DFS(
     ]
     
     if asset_type == "node":
+        stats.node_calls += 1
+
+        # Check for redundant visit
+        if int(current_asset) in recorder.visited_nodes:
+            stats.redundant_node_visits += 1
+            if verbose and stats.redundant_node_visits % 100 == 0:
+                print(f"  REDUNDANT NODE #{stats.redundant_node_visits}: "
+                      f"fid={current_asset}  depth={recursion_depth}", flush=True)
+            return
 
         # Eliminate thing that we've already visited
         # or just come from
@@ -312,12 +392,15 @@ def DFS(
 
         # Dump this info into the network recorder
         recorder.node_list.append([val for val in row_lv])
-        recorder.visited_nodes.append(int(current_asset))
+        recorder.visited_nodes.add(int(current_asset))
 
         # Is node a switch or substation?
-        is_switch = row_lv[-2]
-        is_substation = row_lv[-3]
+        # Column indices: Is_Switch=14, Is_Substation=13 (not [-2],[-3] which
+        # broke when Rating_Normal..Infeed_Voltage columns were added)
+        is_switch = row_lv[14]
+        is_substation = row_lv[13]
         if is_substation:
+            stats.substation_returns += 1
             # log_batch.add_log(logging.INFO, "Reached an adjoining substation")
             return
 
@@ -381,16 +464,17 @@ def DFS(
                 for x in fid_to_map:
                     DFS(
                         recorder,
-                        log_batch, 
+                        log_batch,
                         x,
                         cursor_conn,
                         cursor_lv_assets,
                         cursor_flux,
-                        cursor_graph,
                         connection_flux,
                         recursion_depth,
                         max_recursion_depth,
-                        hyper_edges=hyper_edges
+                        hyper_edges=hyper_edges,
+                        stats=stats,
+                        verbose=verbose,
                     )
 
             else:
@@ -401,7 +485,7 @@ def DFS(
         try:
             if len(new_joining_things) > 0:
                 for x in new_joining_things:
-                    
+
                     DFS(
                         recorder,
                         log_batch,
@@ -409,11 +493,12 @@ def DFS(
                         cursor_conn,
                         cursor_lv_assets,
                         cursor_flux,
-                        cursor_graph,
                         connection_flux,
                         recursion_depth,
                         max_recursion_depth,
-                        hyper_edges=hyper_edges
+                        hyper_edges=hyper_edges,
+                        stats=stats,
+                        verbose=verbose,
                     )
             else:
                 return
@@ -422,29 +507,15 @@ def DFS(
             return
 
     elif asset_type == "edge":
-        
+        stats.edge_calls += 1
+
+        # Check for redundant visit
+        if int(current_asset) in recorder.visited_edges:
+            stats.redundant_edge_visits += 1
+            return
+
         # If this is a regular edge
-        if len(joining_things) == 2: 
-
-            # Check if this edge, or anything with a 
-            # name that is a modified version of it 
-            # exists in the graph mapped_edges table
-            # Convert the target integer to a string
-            target_string = str(current_asset)
-
-            # Construct the SQL query with a parameterized query to prevent SQL injection
-            query = "SELECT * FROM edge_list WHERE fid LIKE ?;"
-
-            # Append the '%' wildcard to the target string
-            target_string_with_wildcard = target_string + '%'
-
-            # Execute the query with the target string as a parameter
-            cursor_graph.execute(query, (target_string_with_wildcard,))
-            row_graph = cursor_graph.fetchone()
-            if row_graph is not None:
-                # log_batch.add_log(logging.WARNING, "An edge reached already had it's name in the edge_list of graph.sqlite")
-                return
-
+        if len(joining_things) == 2:
 
             # Check if it a flux edge
             # If it is then return
@@ -457,14 +528,15 @@ def DFS(
                     cursor_flux.execute(f"UPDATE flux_lines SET Visited = {1} WHERE fid = {current_asset}")
                     connection_flux.commit()
                 elif visited == 1:
+                    stats.flux_returns += 1
                     return
-            
-            # Store all edge info in edge_list 
+
+            # Store all edge info in edge_list
             recorder.edge_list.append([val for val in row_lv])
 
             # Add this edge to visited_edges
-            recorder.visited_edges.append(int(current_asset))
-            
+            recorder.visited_edges.add(int(current_asset))
+
             recorder.incidence_list.append([
                 current_asset,
                 joining_things[0],
@@ -474,6 +546,9 @@ def DFS(
             # Look up the terminal node that is not the active asset
             # and recurse on it. Pass this edge as the new active
             # asset.
+            if joining_things[0] in recorder.visited_nodes and joining_things[1] in recorder.visited_nodes:
+                stats.both_nodes_visited += 1
+                return
             x = joining_things[0] if joining_things[1] in recorder.visited_nodes else joining_things[1]
             DFS(
                 recorder,
@@ -482,34 +557,23 @@ def DFS(
                 cursor_conn,
                 cursor_lv_assets,
                 cursor_flux,
-                cursor_graph,
                 connection_flux,
                 recursion_depth,
                 max_recursion_depth,
-                hyper_edges=hyper_edges
+                hyper_edges=hyper_edges,
+                stats=stats,
+                verbose=verbose,
             )
 
         # If it is a hyper edge
         elif len(joining_things) > 2:
-            
+            stats.hyper_edge_calls += 1
+            stats.hyper_edge_branching.append(len(joining_things))
+            _he_joining = len(joining_things)
+
             # Added to ensure that further steps of DFS stop here if encountered again
-            recorder.visited_edges.append(int(current_asset))
+            recorder.visited_edges.add(int(current_asset))
             
-            target_string = str(current_asset)
-            
-            # Construct the SQL query with a parameterized query to prevent SQL injection
-            query = "SELECT * FROM edge_list WHERE fid LIKE ?;"
-
-            # Append the '%' wildcard to the target string
-            target_string_with_wildcard = target_string + '%'
-
-            # Execute the query with the target string as a parameter
-            cursor_graph.execute(query, (target_string_with_wildcard,))
-            row_graph = cursor_graph.fetchone()
-            
-            if row_graph is not None:
-                # log_batch.add_log(logging.WARNING, "A hyper edge reached already had it's name in the edge_list of graph.sqlite")
-                return
 
             # Pass the edge's geometry together with this 
             # list of "terminal points" to the divide 
@@ -553,11 +617,17 @@ def DFS(
 
 
             #print(f"current_asset = {current_asset}")
+            if verbose:
+                print(f"    dividing fid={current_asset}  points={len(points)}  "
+                      f"depth={recursion_depth}  calls={stats.total_calls}", flush=True)
             sub_edge_geoms, bookends = add_points_and_divide_linestring(
                 edge_geom, points
                 )
-            
-            
+
+            if verbose:
+                print(f"  HYPER fid={current_asset}  joining={_he_joining}  "
+                      f"depth={recursion_depth}  sub_edges={len(sub_edge_geoms)}", flush=True)
+
             # Now each of these sub edges needs recording.
             # They should inheret the properties of the 
             # original hyper edge
@@ -586,17 +656,6 @@ def DFS(
                 sub_edge_fid = str(current_asset) + f"0{i}"
                 
 
-                # Check if this edge, or anything with a 
-                # name that is a modified version of it 
-                # exists in the graph mapped_edges table
-                cursor_graph.execute(
-                    f"SELECT * FROM edge_list WHERE fid = {int(sub_edge_fid)}"
-                )
-                row_graph = cursor_graph.fetchone()
-                if row_graph != None:
-                    # log_batch.add_log(logging.WARNING, "Issue with breaking down a hyper edge")
-                    return
-
                 start_node, end_node = bookends[i]
                     
                 recorder.incidence_list.append([
@@ -612,7 +671,14 @@ def DFS(
                 recorder.edge_list.append([val for val in sub_edge_row_lv])
                 #print(recorder.edge_list)
                 for node in bookends[i]:
-                    # Now call the function recursively 
+                    if node is None:
+                        if verbose:
+                            print(f"    -> sub_edge[{i}] SKIPPING None node  depth={recursion_depth}", flush=True)
+                        continue
+                    if verbose:
+                        print(f"    -> sub_edge[{i}] node={node}  depth={recursion_depth}  "
+                              f"calls={stats.total_calls}", flush=True)
+                    # Now call the function recursively
                     DFS(
                         recorder,
                         log_batch,
@@ -620,11 +686,12 @@ def DFS(
                         cursor_conn,
                         cursor_lv_assets,
                         cursor_flux,
-                        cursor_graph,
                         connection_flux,
                         recursion_depth,
                         max_recursion_depth,
-                        hyper_edges = hyper_edges
+                        hyper_edges=hyper_edges,
+                        stats=stats,
+                        verbose=verbose,
                         )
             return
 
@@ -764,7 +831,7 @@ def map_substation(
     # Populate the network recorder with this data
     net_data = NetworkData()
     net_data.counter = 0
-    net_data.visited_nodes.append(substation_fid)
+    net_data.visited_nodes.add(substation_fid)
     
 
     # Set up database connections
@@ -779,17 +846,6 @@ def map_substation(
 
     connection_flux = sqlite3.connect(flux_db_path)
     cursor_flux = connection_flux.cursor()
-
-    
-    connection_graph = sqlite3.connect('data/graph.sqlite', timeout=120)
-    cursor_graph = connection_graph.cursor()
-
-    # Check if graph.sqlite is in wal mode, and if it isn't then set it to wal mode
-    # This is to ensure that the database can handle concurrent writes and reads
-    journal_mode = cursor_graph.execute("PRAGMA journal_mode;").fetchone()[0]
-    if journal_mode.lower() != "wal":
-        cursor_graph.execute("PRAGMA journal_mode=WAL;")
-
 
     # Find the substation's geom
     cursor_lv_assets.execute(
@@ -836,14 +892,17 @@ def map_substation(
     #     return
 
 
+    dfs_stats = DFSStats()
+    dfs_stats.started_at = time.perf_counter()
+
     for e in incident_edges_filter:
-        
         DFS(net_data, log_batch, e, cursor_net, cursor_lv_assets,
-            cursor_flux, cursor_graph, connection_flux, 0, 
-            max_recursion_depth=max_recursion_depth,hyper_edges = None)
+            cursor_flux, connection_flux, 0,
+            max_recursion_depth=max_recursion_depth, hyper_edges=None,
+            stats=dfs_stats)
         
     net_data.substation = substation_fid
-
+    net_data.dfs_stats = dfs_stats
 
     ## Check the net_data object to make sure it's consistent, and to allow comparison with later steps of mapping to make sure data is not being lost
     DFS_edge_length = log_stats_of_dfs(net_data, log_batch)
@@ -885,7 +944,6 @@ def map_substation(
     cursor_lv_assets.close()
     conn_lv_assets.close()
     cursor_flux.close()
-    cursor_graph.close()
     connection_flux.close()
     cursor_net.close()
     connection_net.close()
