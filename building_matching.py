@@ -363,7 +363,7 @@ def plot_network_on_map(network, substation_fid=None, building_geoms=None, crs="
 
 
 
-def process_fid(fid, sql_fname="data/graph.sqlite"):
+def process_fid(fid, sql_fname="results/graph.sqlite"):
     """
     Process one substation FID and return a result dict.
     """
@@ -389,7 +389,7 @@ def process_fid(fid, sql_fname="data/graph.sqlite"):
         return {"fid": fid, "status": "failed", "error": str(e)}
 
 
-def run_parallel(fids, sql_fname="data/graph.sqlite", max_workers=None):
+def run_parallel(fids, sql_fname="results/graph.sqlite", max_workers=None):
     """
     Run process_fid() across a list of FIDs in parallel with tqdm progress.
     """
@@ -422,7 +422,7 @@ def process_fid_wrapper(args):
 def main():
     # --- Load substation FIDs ---
     # These are the FIDs of all the substations that appear in graph.sqlite
-    summary_path = Path("data/summary.csv")
+    summary_path = Path("results/summary.csv")
     # Load all summary FIDs where column 'warnings_or_errors' is False
     summary_df = pd.read_csv(summary_path)
 
@@ -431,11 +431,11 @@ def main():
 
 
     # # # --- Run parallel mapping ---
-    # # results = run_parallel(remaining_fids, sql_fname="data/graph.sqlite")
+    # # results = run_parallel(remaining_fids, sql_fname="results/graph.sqlite")
 
     # # --- Or run serially for debugging ---
     fid = all_fids[5]
-    results = process_fid(fid, sql_fname="data/graph.sqlite")
+    results = process_fid(fid, sql_fname="results/graph.sqlite")
 
 
 

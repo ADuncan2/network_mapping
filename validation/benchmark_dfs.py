@@ -144,9 +144,9 @@ def benchmark_pipeline(substation_fid, flux_db_path, log_batch):
     # --- Stage 5: Write to graph.sqlite and reload as NetworkX ---
     # This tests the full round-trip: DFS results → SQLite → NetworkX
     t0 = time.perf_counter()
-    net_data.to_sql("data/temp/bench_graph.sqlite")
+    net_data.to_sql("results/temp/bench_graph.sqlite")
     mapped = MappedNetwork()
-    mapped.load_from_sqlite(substation_fid, "data/temp/bench_graph.sqlite")
+    mapped.load_from_sqlite(substation_fid, "results/temp/bench_graph.sqlite")
     timings["t_networkx"] = time.perf_counter() - t0
 
     return net_data, dfs_stats, timings
@@ -154,19 +154,19 @@ def benchmark_pipeline(substation_fid, flux_db_path, log_batch):
 
 def run_benchmark(label=""):
     os.makedirs("results", exist_ok=True)
-    os.makedirs("data/temp", exist_ok=True)
+    os.makedirs("results/temp", exist_ok=True)
 
     # Create a temp graph.sqlite for NetworkX round-trip test
     from gridstock.dbcleaning import create_graph_db
-    if os.path.exists("data/temp/bench_graph.sqlite"):
-        os.remove("data/temp/bench_graph.sqlite")
-    create_graph_db("data/temp/bench_graph.sqlite")
+    if os.path.exists("results/temp/bench_graph.sqlite"):
+        os.remove("results/temp/bench_graph.sqlite")
+    create_graph_db("results/temp/bench_graph.sqlite")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     tag = f"_{label}" if label else ""
     out_path = f"results/benchmark{tag}_{timestamp}.csv"
 
-    flux_db_path = os.path.join("data", "temp", "flux_lines_bench.sqlite")
+    flux_db_path = os.path.join("results", "temp", "flux_lines_bench.sqlite")
 
     stage_names = ["t_setup", "t_way_check", "t_dfs", "t_dfs_stats", "t_networkx"]
 

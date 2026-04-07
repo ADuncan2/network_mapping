@@ -1125,7 +1125,7 @@ def copy_conn_to_lv(report=None) -> None:
 # Step 8: create_graph_db (unchanged)
 # ──────────────────────────────────────────────
 
-def create_graph_db(fname: str = "data/graph.sqlite") -> None:
+def create_graph_db(fname: str = "results/graph.sqlite") -> None:
     """Create empty graph.sqlite output database with WAL mode."""
 
     file_path = fname
@@ -1201,7 +1201,7 @@ def create_graph_db(fname: str = "data/graph.sqlite") -> None:
 # ──────────────────────────────────────────────
 
 def clear_graph_db() -> None:
-    file_path = "data/graph.sqlite"
+    file_path = "results/graph.sqlite"
     connection = sqlite3.connect(file_path)
     cursor = connection.cursor()
 
@@ -1221,7 +1221,7 @@ def clear_graph_db() -> None:
 
 
 def get_mapped_substations_ids_from_summary() -> set:
-    file_path = "data/summary.csv"
+    file_path = "results/summary.csv"
     df = pd.read_csv(file_path)
     fids = pd.to_numeric(df["substation_fid"], errors="coerce")
     valid_fids = fids.dropna().astype(int).tolist()
@@ -1249,7 +1249,7 @@ def get_mapped_substations_from_logs(log_dir="logs") -> set:
 
 
 def get_mapped_substations_ids_from_database() -> set:
-    file_path = "data/graph.sqlite"
+    file_path = "results/graph.sqlite"
     connection = sqlite3.connect(file_path)
     cursor = connection.cursor()
 

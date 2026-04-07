@@ -59,6 +59,7 @@ class LogBatch:
 def setup_logging():
     """Set up the main logging configuration"""
     os.makedirs('logs', exist_ok=True)
+    os.makedirs('results/temp', exist_ok=True)
     
     # Create main logger
     logger = logging.getLogger('mapping')
@@ -168,7 +169,7 @@ def log_writer(log_queue, result_queue, num_expected):
                 if counter % 10 == 0:
                     # Checkpoint the WAL to reduce file size
                     try:
-                        conn = sqlite3.connect("data/graph.sqlite", timeout=10)
+                        conn = sqlite3.connect("results/graph.sqlite", timeout=10)
                         conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
                         conn.close()
                     except Exception as ckpt_err:
@@ -261,7 +262,7 @@ def worker_single(args):
     """Process a single FID and return batched logs"""
     fid, worker_id = args
     process_name = f"Worker-{worker_id}"
-    flux_db_path = os.path.join(".", "data", "temp", f"flux_lines_{worker_id}.sqlite")
+    flux_db_path = os.path.join(".", "results", "temp", f"flux_lines_{worker_id}.sqlite")
     
     # Create log batch for this FID
     log_batch = LogBatch(fid, process_name)

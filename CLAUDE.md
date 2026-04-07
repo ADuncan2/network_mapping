@@ -8,18 +8,18 @@
 
 ### Pipeline stages
 
-1. **Preprocessing** (`cleaning_script.py`) — One-time setup: creates `conn_comp` indexed table, simplifies substations/service points, builds `lv_assets.sqlite` and empty `graph.sqlite`.
-2. **Network mapping** (`single_fid_mapping.py`) — Multiprocessing pipeline that iterates over substation FIDs from `lv_assets.sqlite`, runs DFS via `map_substation()`, and writes topology to `data/graph.sqlite`. Uses batched logging and SQLite WAL mode.
-3. **Building matching** (`building_matching.py`) — Loads mapped networks from `graph.sqlite` as NetworkX graphs via `MappedNetwork`, finds nearby buildings from parquet, matches service points to buildings using overlap → buffer spatial joins.
+1. **Preprocessing** (`cleaning_script.py`) — One-time setup: creates `conn_comp` indexed table, simplifies substations/service points, builds `lv_assets.sqlite` and empty `results/graph.sqlite`.
+2. **Network mapping** (`single_fid_mapping.py`) — Multiprocessing pipeline that iterates over substation FIDs from `lv_assets.sqlite`, runs DFS via `map_substation()`, and writes topology to `results/graph.sqlite`. Uses batched logging and SQLite WAL mode.
+3. **Building matching** (`building_matching.py`) — Loads mapped networks from `results/graph.sqlite` as NetworkX graphs via `MappedNetwork`, finds nearby buildings from parquet, matches service points to buildings using overlap → buffer spatial joins.
 
 ### Key modules (`gridstock/`)
 
 | File | Purpose |
 |------|---------|
 | `mapfuncs.py` | DFS search functions, coordinate interpolation, `map_substation()` |
-| `recorder.py` | `NetworkData` class — stores DFS results, writes to `graph.sqlite` and `summary.csv` |
+| `recorder.py` | `NetworkData` class — stores DFS results, writes to `results/graph.sqlite` and `results/summary.csv` |
 | `dbcleaning.py` | DB setup: `create_lv_db()`, `create_graph_db()`, substation/switch simplification |
-| `network_loader.py` | `MappedNetwork` class — loads mapped networks from `graph.sqlite` into NetworkX |
+| `network_loader.py` | `MappedNetwork` class — loads mapped networks from `results/graph.sqlite` into NetworkX |
 
 ### Validation scripts (`validation/`)
 
@@ -28,14 +28,18 @@
 | `benchmark_dfs.py` | Per-stage timing benchmarks across 40 substations |
 | `diagnose_dfs.py` | Large-scale diagnostic runner with SQLite results DB and resume support |
 
-### Data files (in `data/`, gitignored)
+### Input data (in `data/`, gitignored)
 
 - `assets.gpkg` — Source GeoPackage with all network assets (layers: LV Conductor, Service Point, General Boundary, etc.)
 - `network_data.sqlite` — Raw connectivity table (`conn`)
 - `lv_assets.sqlite` — Filtered LV-only subset of assets
-- `graph.sqlite` — Output: mapped network incidence lists, edge/node properties, mapped substations (WAL mode)
 - `all_buildings_in_enwl_27700.parquet` — Building footprints with UPRN/TOID in EPSG:27700
+
+### Output data (in `results/`, gitignored)
+
+- `graph.sqlite` — Mapped network incidence lists, edge/node properties, mapped substations (WAL mode)
 - `summary.csv` — Per-substation mapping summary stats
+- `temp/` — Per-worker flux line databases and validation temp files
 
 ## Tech Stack
 

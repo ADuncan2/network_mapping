@@ -106,7 +106,7 @@ class NetworkData:
 
     def to_sql(
             self,
-            fname: str = "data/graph.sqlite"
+            fname: str = "results/graph.sqlite"
             ) -> None:
         """
         Function to write the network data 
@@ -175,7 +175,7 @@ class NetworkData:
             cursor.close()
             connection.close()
 
-    def to_csv(self, fname: str = "data/summary.csv") -> None:
+    def to_csv(self, fname: str = "results/summary.csv") -> None:
         """
         Save the summary_stats dictionary to a CSV as a new row.
         """

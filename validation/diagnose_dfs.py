@@ -237,7 +237,7 @@ def run_full_pipeline(substation_fid, flux_db_path, log_batch, stats):
 
     # --- Stage 5: Write to temp graph.sqlite and reload as NetworkX ---
     t0 = time.perf_counter()
-    diag_graph_path = "data/temp/diag_graph.sqlite"
+    diag_graph_path = "results/temp/diag_graph.sqlite"
     net_data.to_sql(diag_graph_path)
     mapped = MappedNetwork()
     mapped.load_from_sqlite(substation_fid, diag_graph_path)
@@ -312,10 +312,10 @@ def main():
     args = parser.parse_args()
 
     os.makedirs("results", exist_ok=True)
-    os.makedirs("data/temp", exist_ok=True)
+    os.makedirs("results/temp", exist_ok=True)
 
     # Create temp graph.sqlite for NetworkX round-trip stage
-    diag_graph_path = "data/temp/diag_graph.sqlite"
+    diag_graph_path = "results/temp/diag_graph.sqlite"
     if os.path.exists(diag_graph_path):
         os.remove(diag_graph_path)
     create_graph_db(diag_graph_path)
@@ -348,7 +348,7 @@ def main():
     log_event(results_conn, "run_started",
               f"{len(fids_to_run)} substations, limit={args.limit}")
 
-    flux_db_path = os.path.join("data", "temp", "flux_lines_diag.sqlite")
+    flux_db_path = os.path.join("results", "temp", "flux_lines_diag.sqlite")
 
     print(f"\nStarting at {datetime.now().strftime('%H:%M:%S')}")
     print(f"Results: {args.db}")

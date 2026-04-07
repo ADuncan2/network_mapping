@@ -19,7 +19,7 @@ class MappedNetwork:
         self.lamp_posts = []
         self.net = nx.Graph()
 
-    def load_from_sqlite(self, fid: int, sql_fname="data/graph.sqlite") -> None:
+    def load_from_sqlite(self, fid: int, sql_fname="results/graph.sqlite") -> None:
         """
         Read a substation's mapped network from graph.sqlite and
         build a NetworkX graph with node/edge attributes.

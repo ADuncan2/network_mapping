@@ -13,12 +13,14 @@ Pipeline order:
   5. simplify_pmt_substations — Create 5m buffer circles for PMTs, find flux lines
   6. enrich_substations    — Spatial join: transformer capacity → General Boundary rows
   7. copy_conn_to_lv       — Copy conn_comp (fid_from, fid_to, flow) into lv_assets.sqlite
-  8. create_graph_db       — Create empty output database (graph.sqlite)
+  8. create_graph_db       — Create empty output database (results/graph.sqlite)
 
 NOT INCLUDED (removed from previous pipeline):
   - collapse_switch_boxes  — No longer needed; Way status checked directly in DFS
   - creating_conn_new      — No longer needed; conn_comp created fresh from conn
 """
+
+import os
 
 from gridstock.dbcleaning import (
     PreprocessingReport,
@@ -84,10 +86,11 @@ print("=" * 60)
 copy_conn_to_lv(report)
 print("done\n")
 
-# Step 8: Create empty graph.sqlite
+# Step 8: Create empty results/graph.sqlite
 print("=" * 60)
-print("Step 8: Creating graph.sqlite...")
+print("Step 8: Creating results/graph.sqlite...")
 print("=" * 60)
+os.makedirs("results", exist_ok=True)
 create_graph_db()
 print("done\n")
 
