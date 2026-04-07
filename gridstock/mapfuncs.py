@@ -899,13 +899,12 @@ def map_substation(
     switch_count = len([n for n in net_data.node_list if n[2] == 'Switch'])
 
     # --- Location: convert substation centroid to lat/lon ---
-    lat, lon = None, None
+    lat_lon = None
     if row_lv is not None:
         try:
             centroid = wkb.loads(row_lv[1]).centroid
             lon, lat = _to_wgs84.transform(centroid.x, centroid.y)
-            lat = round(lat, 6)
-            lon = round(lon, 6)
+            lat_lon = f"{round(lat, 6)}, {round(lon, 6)}"
         except Exception:
             pass
 
@@ -928,10 +927,9 @@ def map_substation(
     summary_stats = {
         # Location
         "substation_fid": substation_fid,
-        "lat": lat,
-        "lon": lon,
+        "lat_lon": lat_lon,
         # Substation properties
-        "substation_type": row_lv[17] if row_lv else None,      # Substation_Type
+        "is_pmt": row_lv[2] == "PMT Transformer" if row_lv else None,
         "rating_kva": row_lv[15] if row_lv else None,           # Rating_Normal
         "infeed_voltage": row_lv[18] if row_lv else None,       # Infeed_Voltage
         # Network size
