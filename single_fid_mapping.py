@@ -94,14 +94,43 @@ def setup_logging():
     
     return logger, timestamp
 
+def _process_log_batch(log_item, logger, stats):
+    """Write one LogBatch to the logger and update stats."""
+    if not isinstance(log_item, LogBatch):
+        return
+    duration = log_item.get_duration()
+    stats['total_processing_time'] += duration
+    extra = {'fid': log_item.fid}
+
+    for msg in log_item.messages:
+        if msg['level'] == logging.WARNING:
+            stats['warnings'] += 1
+        elif msg['level'] == logging.ERROR:
+            stats['errors'] += 1
+        logger.log(msg['level'], msg['message'], extra=extra)
+
+    logger.info(f"Processing duration: {duration}", extra=extra)
+    for handler in logger.handlers:
+        handler.flush()
+
+
 def log_writer(log_queue, result_queue, num_expected):
-    """Combined writer that handles both logging and results"""
+    """Combined writer that handles both logging and results.
+
+    Uses a persistent SQLite connection for all to_sql() calls and
+    blocking queue.get() to avoid busy-polling.
+
+    The main loop runs until a None sentinel arrives on result_queue
+    (sent by the main process after the pool finishes or is interrupted).
+    The num_expected count is used only for the progress summary — it
+    does NOT gate the exit, so failed mappings that never produce a
+    result won't cause the writer to hang.
+    """
     logger, log_timestamp = setup_logging()
-    
+
     completed = 0
     failed = 0
-    
-    # Keep track of statistics
+
     stats = {
         'completed': 0,
         'failed': 0,
@@ -112,138 +141,89 @@ def log_writer(log_queue, result_queue, num_expected):
     }
 
     counter = 0
-    
-    while completed + failed < num_expected:
-        log_processed = False
-        result_processed = False
-        
-        # Check for log batches (non-blocking)
-        try:
-            log_item = log_queue.get_nowait()
-            if log_item is None:  # Shutdown signal for logging
-                break
-                
-            log_processed = True
-            
-            # Handle log batch
-            if isinstance(log_item, LogBatch):
-                duration = log_item.get_duration()
-                stats['total_processing_time'] += duration
-                
-                # Log all messages for this FID together
-                for msg in log_item.messages:
-                    extra = {'fid': log_item.fid}
-                    
-                    if msg['level'] == logging.INFO:
-                        logger.info(msg['message'], extra=extra)
-                    elif msg['level'] == logging.WARNING:
-                        logger.warning(msg['message'], extra=extra)
-                        stats['warnings'] += 1
-                    elif msg['level'] == logging.ERROR:
-                        logger.error(msg['message'], extra=extra)
-                        stats['errors'] += 1
-                
-                # Add duration summary for this FID
-                logger.info(f"Processing duration: {duration}", extra={'fid': log_item.fid})
 
-                # Force flush to disk immediately
-                for handler in logger.handlers:
-                    handler.flush()
-                
-        except:
-            pass  # No log messages available
-        
-        # Check for result data (non-blocking)
-        try:
-            network_data = result_queue.get_nowait()
-            if network_data is None:  # Shutdown signal for results
-                break
-                
-            result_processed = True
-            
+    # Persistent DB connection — reused for every to_sql() call
+    db_conn = sqlite3.connect("results/graph.sqlite", timeout=30)
+
+    shutdown = False
+    while not shutdown:
+        # --- Drain all pending log batches (non-blocking) ---
+        while True:
             try:
-                # Save network data to database
-                network_data.to_sql()
+                log_item = log_queue.get_nowait()
+                if log_item is None:
+                    break
+                _process_log_batch(log_item, logger, stats)
+            except Empty:
+                break
 
-                counter += 1
-                if counter % 10 == 0:
-                    # Checkpoint the WAL to reduce file size
-                    try:
-                        conn = sqlite3.connect("results/graph.sqlite", timeout=10)
-                        conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
-                        conn.close()
-                    except Exception as ckpt_err:
-                        print(f"Checkpoint failed: {ckpt_err}")
+        # --- Block on the result queue (where the real work is) ---
+        try:
+            network_data = result_queue.get(timeout=0.5)
+        except Empty:
+            continue  # loop back to drain logs and retry
 
-                time.sleep(0.5)  # Allow time for the checkpoint to complete
+        if network_data is None:  # Shutdown signal from main process
+            shutdown = True
+            break
 
-                # If the network data has summary stats, save them as well
-                if hasattr(network_data, 'summary_stats'):
-                    network_data.to_csv()
-                    pass
-                completed += 1
-                stats['completed'] += 1
-                
-                # Log successful save
-                fid = getattr(network_data, 'fid', 'Unknown')
-                logger.info(f"Successfully saved network data", extra={'fid': fid})
-                
-                # Force flush after database saves
-                for handler in logger.handlers:
-                    handler.flush()
-                
-            except Exception as e:
-                failed += 1
-                stats['failed'] += 1
-                error_msg = f"Error saving network data: {str(e)}"
-                fid = getattr(network_data, 'fid', 'Unknown')
-                logger.error(error_msg, extra={'fid': fid})
-                
-                # Force flush after errors (critical for debugging)
-                for handler in logger.handlers:
-                    handler.flush()
-                
-        except:
-            pass  # No result data available
-        
-        # If neither queue had data, sleep briefly to avoid busy waiting
-        if not log_processed and not result_processed:
-            import time
-            time.sleep(0.1)
-    
-    # Process any remaining log messages
-    remaining_logs = True
-    while remaining_logs:
+        try:
+            network_data.to_sql(connection=db_conn)
+
+            counter += 1
+            if counter % 500 == 0:
+                try:
+                    db_conn.execute("PRAGMA wal_checkpoint(PASSIVE);")
+                except Exception as ckpt_err:
+                    print(f"Checkpoint failed: {ckpt_err}")
+
+            if hasattr(network_data, 'summary_stats'):
+                network_data.to_csv()
+            completed += 1
+            stats['completed'] += 1
+
+            fid = getattr(network_data, 'fid', 'Unknown')
+            logger.info("Successfully saved network data", extra={'fid': fid})
+            for handler in logger.handlers:
+                handler.flush()
+
+        except Exception as e:
+            failed += 1
+            stats['failed'] += 1
+            fid = getattr(network_data, 'fid', 'Unknown')
+            logger.error(f"Error saving network data: {e}", extra={'fid': fid})
+            for handler in logger.handlers:
+                handler.flush()
+
+    # Final WAL checkpoint and close persistent connection
+    try:
+        db_conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+    except Exception:
+        pass
+    db_conn.close()
+
+    # Drain any remaining log messages
+    while True:
         try:
             log_item = log_queue.get_nowait()
             if log_item is None:
                 break
-                
-            # Handle remaining log batch
-            if isinstance(log_item, LogBatch):
-                duration = log_item.get_duration()
-                stats['total_processing_time'] += duration
-                
-                for msg in log_item.messages:
-                    extra = {'fid': log_item.fid}
-                    logger.log(msg['level'], msg['message'], extra=extra)
-                
-                logger.info(f"Processing duration: {duration}", extra={'fid': log_item.fid})
-        except:
-            remaining_logs = False
-    
+            _process_log_batch(log_item, logger, stats)
+        except Empty:
+            break
+
     # Log final statistics
     total_duration = datetime.now() - stats['start_time']
     avg_processing_time = stats['total_processing_time'] / max(completed + failed, 1)
-    
+
     summary_msg = (f"Mapping completed - Total: {completed + failed}, "
                   f"Success: {completed}, Failed: {failed}, "
                   f"Warnings: {stats['warnings']}, Errors: {stats['errors']}, "
                   f"Total Duration: {total_duration}, "
                   f"Avg Processing Time: {avg_processing_time}")
-    
+
     logger.info(summary_msg, extra={'fid': 'SUMMARY'})
-    
+
     print(f"\n=== Mapping Summary ===")
     print(f"Total processed: {completed + failed}")
     print(f"Successful: {completed}")
@@ -253,16 +233,16 @@ def log_writer(log_queue, result_queue, num_expected):
     print(f"Total duration: {total_duration}")
     print(f"Average processing time per substation: {avg_processing_time}")
     print(f"Log file: logs/mapping_{log_timestamp}.log")
-    
+
     return stats
 
 
 
 def worker_single(args):
     """Process a single FID and return batched logs"""
-    fid, worker_id = args
-    process_name = f"Worker-{worker_id}"
-    flux_db_path = os.path.join(".", "results", "temp", f"flux_lines_{worker_id}.sqlite")
+    fid, _worker_id = args
+    process_name = f"Worker-{os.getpid()}"
+    flux_db_path = os.path.join(".", "results", "temp", f"flux_lines_{os.getpid()}.sqlite")
     
     # Create log batch for this FID
     log_batch = LogBatch(fid, process_name)
@@ -338,8 +318,9 @@ def main():
     # Each worker gets a worker_id for temp file naming
     worker_args = [(fid, i % num_of_workers) for i, fid in enumerate(fids)]
 
-    # Create queues
-    result_queue = Queue()
+    # Create queues (result_queue bounded to provide backpressure if
+    # the writer falls behind — prevents unbounded memory growth)
+    result_queue = Queue(maxsize=100)
     log_queue = Queue()
     
     # Start the combined writer process

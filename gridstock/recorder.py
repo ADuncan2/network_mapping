@@ -106,74 +106,76 @@ class NetworkData:
 
     def to_sql(
             self,
-            fname: str = "results/graph.sqlite"
+            fname: str = "results/graph.sqlite",
+            connection: sqlite3.Connection = None,
             ) -> None:
         """
-        Function to write the network data 
-        to the sql file.
-        """
-        #print("Full edge list:")
-        #print(self.edge_list)
+        Write the network data to graph.sqlite using batched inserts.
 
+        If *connection* is provided it is reused (caller owns the lifecycle).
+        Otherwise a new connection is opened and closed per call.
+        """
         if len(self.edge_list) > 1:
-        
-            connection = sqlite3.connect(fname)
+
+            own_conn = connection is None
+            if own_conn:
+                connection = sqlite3.connect(fname, timeout=30)
             cursor = connection.cursor()
 
-            if self.substation != None:
+            if self.substation is not None:
                 parent_substation = int(self.substation)
-                cursor.execute("INSERT INTO mapped_substations (substation_fid) VALUES (?)", (parent_substation,))
-            if self.switch != None:
+                cursor.execute(
+                    "INSERT OR IGNORE INTO mapped_substations (substation_fid) VALUES (?)",
+                    (parent_substation,))
+            if self.switch is not None:
                 parent_switch = int(self.switch)
-                cursor.execute("INSERT INTO mapped_switches (switch_fid) VALUES (?)", (parent_switch,))
+                cursor.execute(
+                    "INSERT OR IGNORE INTO mapped_switches (switch_fid) VALUES (?)",
+                    (parent_switch,))
 
+            # Batch insert incidence list
+            if self.substation is not None:
+                inc_rows = []
+                for line, node_from, node_to in self.incidence_list:
+                    inc_rows.append((int(line), int(node_from), int(node_to), int(parent_substation)))
+                cursor.executemany(
+                    "INSERT OR IGNORE INTO incidence_list "
+                    "(edge_fid, node_from, node_to, parent_substation) "
+                    "VALUES (?, ?, ?, ?)",
+                    inc_rows)
+            elif self.switch is not None:
+                inc_rows = []
+                for line, node_from, node_to in self.incidence_list:
+                    inc_rows.append((int(line), int(node_from), int(node_to), int(parent_switch)))
+                cursor.executemany(
+                    "INSERT OR IGNORE INTO incidence_list "
+                    "(edge_fid, node_from, node_to, parent_switch) "
+                    "VALUES (?, ?, ?, ?)",
+                    inc_rows)
 
-            for entry in self.incidence_list:
-                line, node_from, node_to = entry
-                #print(line)
-                try:
-                    if self.substation != None:
-                        cursor.execute("INSERT INTO incidence_list (edge_fid, node_from, node_to, parent_substation) VALUES (?, ?, ?, ?)", (int(line), int(node_from), int(node_to), int(parent_substation)))
-                    if self.switch != None:
-                        cursor.execute("INSERT INTO incidence_list (edge_fid, node_from, node_to, parent_switch) VALUES (?, ?, ?, ?)", (int(line), int(node_from), int(node_to), int(parent_switch)))
-                except sqlite3.IntegrityError as e:
-                    #print("incident list error:")
-                    #print("IntegrityError:", e)
-                    pass
+            # Batch insert edges — first 13 columns (fid..Switch_Status)
+            cursor.executemany(
+                'INSERT OR IGNORE INTO edge_list (fid, Geometry, Asset_Type, Voltage, '
+                'Material, Conductors_Per_Phase, Cable_Size, Insulation, '
+                'Installation_Date, Phases_Connected, Sleeve_Type, '
+                'Associated_Cable, Switch_Status) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                [entry[:13] for entry in self.edge_list])
 
-            # Now need to insert into edge_list by copying from self.edge_list
-            # Insert edges — use slicing to get first 13 columns (fid..Switch_Status)
-            # which match the graph.sqlite schema, regardless of how many columns
-            # lv_assets has (currently 20)
-            for entry in self.edge_list:
-                try:
-                    cursor.execute(
-                        'INSERT INTO edge_list (fid, Geometry, Asset_Type, Voltage, '
-                        'Material, Conductors_Per_Phase, Cable_Size, Insulation, '
-                        'Installation_Date, Phases_Connected, Sleeve_Type, '
-                        'Associated_Cable, Switch_Status) '
-                        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                        entry[:13])
-                except sqlite3.Error:
-                    pass
-
-            # Insert nodes — same first-13-columns approach
-            for entry in self.node_list:
-                try:
-                    cursor.execute(
-                        'INSERT INTO node_list (fid, Geometry, Asset_Type, Voltage, '
-                        'Material, Conductors_Per_Phase, Cable_Size, Insulation, '
-                        'Installation_Date, Phases_Connected, Sleeve_Type, '
-                        'Associated_Cable, Switch_Status) '
-                        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                        entry[:13])
-                except sqlite3.IntegrityError:
-                    pass
+            # Batch insert nodes — same first-13-columns approach
+            cursor.executemany(
+                'INSERT OR IGNORE INTO node_list (fid, Geometry, Asset_Type, Voltage, '
+                'Material, Conductors_Per_Phase, Cable_Size, Insulation, '
+                'Installation_Date, Phases_Connected, Sleeve_Type, '
+                'Associated_Cable, Switch_Status) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                [entry[:13] for entry in self.node_list])
 
             connection.commit()
 
             cursor.close()
-            connection.close()
+            if own_conn:
+                connection.close()
 
     def to_csv(self, fname: str = "results/summary.csv") -> None:
         """

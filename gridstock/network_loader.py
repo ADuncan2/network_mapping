@@ -75,8 +75,8 @@ class MappedNetwork:
                         self.service_points.append(node)
                     if node_data[1] == "Switch":
                         self.switches.append(node)
-            except Exception as e:
-                print(f"Skipping node {node}: {e}")
+            except Exception:
+                pass  # node missing from node_list — skipped
 
         num_nodes_after_node_initialisation = self.net.number_of_nodes()
 
@@ -107,8 +107,7 @@ class MappedNetwork:
         # Check for spurious nodes added by edges
         nodes_after_edges_added = self.net.number_of_nodes()
         if nodes_after_edges_added != num_nodes_after_node_initialisation:
-            print(f"Warning: {nodes_after_edges_added - num_nodes_after_node_initialisation} "
-                  f"spurious nodes added during edge creation for FID {fid}")
+            self._spurious_nodes = nodes_after_edges_added - num_nodes_after_node_initialisation
 
         cursor.close()
         connection.close()

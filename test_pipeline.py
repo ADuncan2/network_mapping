@@ -21,7 +21,7 @@ from building_matching import process_fid
 from single_fid_mapping import LogBatch
 
 # ── Configuration ──────────────────────────────────────────────────
-N_SUBSTATIONS = 50
+N_SUBSTATIONS = 100
 SEED = 42                         # Set to None for truly random
 TEST_DIR = Path("results/test")
 TEST_GRAPH_DB = TEST_DIR / "graph.sqlite"
@@ -126,7 +126,6 @@ def run_building_matching(fids):
         result = process_fid(
             fid,
             sql_fname=str(TEST_GRAPH_DB),
-            matches_path=str(TEST_MATCHES_CSV),
         )
         results.append(result)
 

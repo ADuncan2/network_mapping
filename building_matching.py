@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import pandas as pd
 import geopandas as gpd
 from shapely import from_wkb
@@ -377,10 +378,10 @@ def plot_network_on_map(network, substation_fid=None, building_geoms=None, crs="
 
 
 
-def process_fid(fid, sql_fname="results/graph.sqlite",
-                matches_path="results/building_matches.csv"):
+def process_fid(fid, sql_fname="results/graph.sqlite"):
     """
-    Process one substation FID: load network, match buildings, persist results.
+    Process one substation FID: load network, match buildings, persist results
+    to the building_matches table in graph.sqlite.
 
     Returns a dict with status and per-substation match summary stats.
     """
@@ -397,22 +398,31 @@ def process_fid(fid, sql_fname="results/graph.sqlite",
             }
 
         building_geoms, buffer_outline = get_buildings_near_fid(network, fid, buffer_scale=1.7)
-        print(f"Substation {fid}: {len(building_geoms)} buildings found near network.", flush=True)
 
         match_df = match_buildings_to_network(network, building_geoms)
-        print(f"Substation {fid}: building matching complete.", flush=True)
 
-        # --- Persist per-service-point matches ---
-        match_df.insert(0, "substation_fid", fid)
-        # Select only the columns we want to save
-        save_cols = ["substation_fid", "service_point_fid", "toid", "uprn",
+        # --- Persist per-service-point matches to graph.sqlite ---
+        save_cols = ["service_point_fid", "toid", "uprn",
                      "match_method", "dist_to_building", "activity_type"]
-        # Keep only columns that exist (uprn/activity_type may not be present yet)
         save_cols = [c for c in save_cols if c in match_df.columns]
-        out_df = match_df[save_cols]
+        out_df = match_df[save_cols].copy()
+        out_df.insert(0, "substation_fid", fid)
 
-        file_exists = os.path.exists(matches_path)
-        out_df.to_csv(matches_path, mode="a", header=not file_exists, index=False)
+        conn = sqlite3.connect(sql_fname, timeout=30)
+        cur = conn.cursor()
+        cols = ["service_point_fid", "substation_fid", "toid", "uprn",
+                "match_method", "dist_to_building", "activity_type"]
+        cols = [c for c in cols if c in out_df.columns]
+        placeholders = ", ".join(["?"] * len(cols))
+        col_names = ", ".join(cols)
+        cur.executemany(
+            f"INSERT OR REPLACE INTO building_matches ({col_names}) "
+            f"VALUES ({placeholders})",
+            out_df[cols].values.tolist(),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
 
         # --- Compute per-substation summary ---
         n_matched = int(match_df["toid"].notna().sum()) if "toid" in match_df.columns else 0
@@ -445,9 +455,9 @@ def run_parallel(fids, sql_fname="results/graph.sqlite", max_workers=None,
     then reuses the cached DataFrame for all substations it processes.
     """
     if max_workers is None:
-        max_workers = max(1, os.cpu_count() - 5)
-
-    print(f" Running with {max_workers} workers")
+        # Each worker loads ~3.5 GB (buildings parquet + spatial index).
+        # Cap at 4 to stay within ~14 GB on a 32 GB machine.
+        max_workers = min(4, max(1, os.cpu_count() - 5))
 
     results = []
     with mp.Pool(
@@ -460,7 +470,7 @@ def run_parallel(fids, sql_fname="results/graph.sqlite", max_workers=None,
                 process_fid_wrapper, [(fid, sql_fname) for fid in fids]
             ),
             total=len(fids),
-            desc="Mapping substations",
+            desc=f"Building matching ({max_workers} workers)",
         ):
             results.append(result)
     return results
@@ -475,23 +485,45 @@ def process_fid_wrapper(args):
 
 
 def main():
-    # --- Load substation FIDs ---
-    summary_path = Path("results/summary.csv")
-    summary_df = pd.read_csv(summary_path)
+    sql_fname = "results/graph.sqlite"
 
-    all_fids = summary_df["substation_fid"].astype(str).tolist()
+    # --- Load all mapped substation FIDs from graph.sqlite ---
+    conn = sqlite3.connect(sql_fname, timeout=30)
+    cur = conn.cursor()
+    cur.execute("SELECT substation_fid FROM mapped_substations")
+    all_fids = [str(r[0]) for r in cur.fetchall()]
 
-    # # --- Run parallel mapping ---
-    # results = run_parallel(all_fids, sql_fname="results/graph.sqlite")
+    # --- Resume: skip substations already in building_matches ---
+    cur.execute("SELECT DISTINCT substation_fid FROM building_matches")
+    done_fids = {str(r[0]) for r in cur.fetchall()}
+    cur.close()
+    conn.close()
 
-    # --- Or run serially for debugging ---
-    fid = all_fids[5]
-    results = [process_fid(fid, sql_fname="results/graph.sqlite")]
+    fids = [fid for fid in all_fids if fid not in done_fids]
+
+    tqdm.write(f"Mapped substations: {len(all_fids)}  |  "
+               f"Already matched: {len(done_fids)}  |  "
+               f"Remaining: {len(fids)}")
+
+    if not fids:
+        tqdm.write("No substations to process!")
+        return
+
+    # --- Run parallel matching ---
+    try:
+        results = run_parallel(fids, sql_fname=sql_fname)
+    except KeyboardInterrupt:
+        tqdm.write("\nBuilding matching interrupted by user!")
+        results = []
 
     # --- Save per-substation building match summary ---
-    results_df = pd.DataFrame(results)
-    results_df.to_csv("results/building_match_summary.csv", index=False)
-    print(f"Building matching complete. Summary saved to results/building_match_summary.csv")
+    if results:
+        results_df = pd.DataFrame(results)
+        results_df.to_csv("results/building_match_summary.csv", index=False)
+        tqdm.write(f"Building matching complete. {len(results)} processed. "
+                   f"Summary saved to results/building_match_summary.csv")
+    else:
+        tqdm.write("No results to save.")
 
 
 if __name__ == "__main__":

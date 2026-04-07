@@ -1190,6 +1190,18 @@ def create_graph_db(fname: str = "results/graph.sqlite") -> None:
             Switch_Status TEXT NULL
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS building_matches (
+            service_point_fid INTEGER,
+            substation_fid INTEGER,
+            toid TEXT NULL,
+            uprn TEXT NULL,
+            match_method TEXT NULL,
+            dist_to_building REAL NULL,
+            activity_type TEXT NULL,
+            PRIMARY KEY (service_point_fid, substation_fid)
+        )
+    """)
 
     connection.commit()
     cursor.close()
