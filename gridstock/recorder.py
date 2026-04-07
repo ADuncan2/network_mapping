@@ -94,7 +94,7 @@ class NetworkData:
                     edge_row[1] = wkb.dumps(merged_line)
                 else:
                     raise TypeError("Could not merge lines.")
-            break
+                break
         
         # Modify incidence
         for row in self.incidence_list:

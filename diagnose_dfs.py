@@ -1,53 +1,174 @@
 """
-DFS diagnostic script.
-Runs problem substations + control substations with full instrumentation
-to identify root causes of memory blowup and runaway DFS.
+Large-scale DFS diagnostic script.
+Runs the full mapping pipeline on all substations, writing results
+incrementally to a SQLite database. Supports resume on restart.
 
 Usage:
-    python diagnose_dfs.py
+    python diagnose_dfs.py              # run all substations (shuffled)
+    python diagnose_dfs.py --limit 500  # run at most 500 substations
+    python diagnose_dfs.py --db results/my_run.sqlite  # custom output path
+
+Monitor progress from another terminal:
+    python -c "
+    import sqlite3, sys
+    c = sqlite3.connect('results/diagnostic.sqlite')
+    for r in c.execute('SELECT status, COUNT(*), ROUND(AVG(t_total),2) FROM results GROUP BY status'):
+        print(f'  {r[0]:>15s}: {r[1]:>5d}  avg {r[2]}s')
+    total = c.execute('SELECT COUNT(*) FROM results').fetchone()[0]
+    print(f'  Total: {total}')
+    "
 """
 
 import os
+import sys
 import time
-import csv
+import random
 import sqlite3
 import logging
+import argparse
 import tracemalloc
 from datetime import datetime
-from collections import Counter
 
 from gridstock.recorder import NetworkData
-from gridstock.mapfuncs import DFS, DFSStats, DFSBudgetExceeded
+from gridstock.mapfuncs import (
+    DFS, DFSStats, DFSBudgetExceeded,
+    log_stats_of_dfs, flux_way_check,
+    ConfigManager, DistributionNetwork,
+)
 from gridstock.dbcleaning import create_station_flux_lines_table, reset_station_flux_lines_table
 
-# Known problem substations (hardcoded exclusion list + benchmark crasher)
-PROBLEM_SUBS = [11375446, 11375106, 11375790, 11375939, 11376031, 20641038]
 
-# Known-good substations for comparison (small / medium / large)
-CONTROL_SUBS = [11374876, 11377484, 11381596]
+# ---------------------------------------------------------------------------
+# Results database
+# ---------------------------------------------------------------------------
 
-# Benchmark substations (13 ground-mounted + 5 PMT)
-BENCHMARK_SUBS = [
-    11375741, 11376677, 11377424, 11377527, 11381369, 11381596,
-    11381873, 11383667, 11384273, 11389576, 11390927,
-    20622972, 20625444, 20630799, 20642174, 68518209,
-]
+RESULTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS results (
+    fid             INTEGER PRIMARY KEY,
+    status          TEXT NOT NULL,
+    nodes           INTEGER DEFAULT 0,
+    edges           INTEGER DEFAULT 0,
+    service_points  INTEGER DEFAULT 0,
+    incidence_rows  INTEGER DEFAULT 0,
+    total_calls     INTEGER DEFAULT 0,
+    node_calls      INTEGER DEFAULT 0,
+    edge_calls      INTEGER DEFAULT 0,
+    hyper_edge_calls INTEGER DEFAULT 0,
+    max_depth       INTEGER DEFAULT 0,
+    depth_limit_hits INTEGER DEFAULT 0,
+    redundant_node_visits INTEGER DEFAULT 0,
+    redundant_edge_visits INTEGER DEFAULT 0,
+    both_nodes_visited INTEGER DEFAULT 0,
+    flux_returns    INTEGER DEFAULT 0,
+    substation_returns INTEGER DEFAULT 0,
+    t_total         REAL DEFAULT 0,
+    t_setup         REAL DEFAULT 0,
+    t_way_check     REAL DEFAULT 0,
+    t_dfs           REAL DEFAULT 0,
+    t_dfs_stats     REAL DEFAULT 0,
+    t_networkx      REAL DEFAULT 0,
+    t_pandapower    REAL DEFAULT 0,
+    t_simulation    REAL DEFAULT 0,
+    peak_memory_mb  REAL DEFAULT 0,
+    error           TEXT DEFAULT '',
+    completed_at    TEXT
+);
 
-# Random substations for wider coverage
-RANDOM_SUBS = [11382294, 20645582, 20635558, 11384262, 20654077, 20633799]
+CREATE TABLE IF NOT EXISTS run_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    event       TEXT NOT NULL,
+    timestamp   TEXT NOT NULL,
+    detail      TEXT DEFAULT ''
+);
+"""
 
+
+def init_results_db(db_path):
+    """Create or open the results database."""
+    os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
+    conn = sqlite3.connect(db_path, timeout=30)
+    conn.executescript(RESULTS_SCHEMA)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.commit()
+    return conn
+
+
+def get_completed_fids(conn):
+    """Return set of FIDs already in the results table."""
+    rows = conn.execute("SELECT fid FROM results").fetchall()
+    return {r[0] for r in rows}
+
+
+def write_result(conn, row):
+    """Insert one result row immediately."""
+    cols = list(row.keys())
+    placeholders = ", ".join(["?"] * len(cols))
+    col_names = ", ".join(cols)
+    conn.execute(
+        f"INSERT OR REPLACE INTO results ({col_names}) VALUES ({placeholders})",
+        [row[c] for c in cols]
+    )
+    conn.commit()
+
+
+def log_event(conn, event, detail=""):
+    """Write a timestamped event to the run_log table."""
+    conn.execute(
+        "INSERT INTO run_log (event, timestamp, detail) VALUES (?, ?, ?)",
+        (event, datetime.now().isoformat(), str(detail)[:500])
+    )
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# FID loading
+# ---------------------------------------------------------------------------
+
+def load_all_substation_fids():
+    """Load all substation FIDs from lv_assets."""
+    conn = sqlite3.connect('data/lv_assets.sqlite', timeout=120)
+    cur = conn.cursor()
+    cur.execute("SELECT fid FROM lv_assets WHERE Is_Substation = 1")
+    fids = [r[0] for r in cur.fetchall()]
+    conn.close()
+    return fids
+
+
+# ---------------------------------------------------------------------------
+# LogBatch (minimal, matches single_fid_mapping interface)
+# ---------------------------------------------------------------------------
 
 class LogBatch:
-    """Minimal LogBatch for diagnostics."""
     def __init__(self, fid):
         self.fid = fid
+        self.process_name = "Diagnostic"
         self.messages = []
+        self.start_time = datetime.now()
+        self.end_time = None
+
     def add_log(self, level, message):
         self.messages.append({'level': level, 'message': message})
 
+    def finalize(self):
+        self.end_time = datetime.now()
 
-def dfs_only_instrumented(substation_fid, flux_db_path, log_batch, stats, max_recursion_depth=2000, verbose=True):
-    """Run DFS with full instrumentation. Returns NetworkData."""
+    def get_duration(self):
+        if self.end_time:
+            return self.end_time - self.start_time
+        return datetime.now() - self.start_time
+
+
+# ---------------------------------------------------------------------------
+# Full pipeline with per-stage timing
+# ---------------------------------------------------------------------------
+
+def run_full_pipeline(substation_fid, flux_db_path, log_batch, stats):
+    """Run the full mapping pipeline. Returns (net_data, stats, timings)."""
+    timings = {}
+
+    # --- Stage 1: DB setup & edge filtering ---
+    t0 = time.perf_counter()
+
     connection_net = sqlite3.connect('data/network_data.sqlite', timeout=120)
     cursor_net = connection_net.cursor()
 
@@ -72,13 +193,11 @@ def dfs_only_instrumented(substation_fid, flux_db_path, log_batch, stats, max_re
     connection_flux = sqlite3.connect(flux_db_path)
     cursor_flux = connection_flux.cursor()
 
-    # Get substation geom
     cursor_lv.execute(f"SELECT * FROM lv_assets where fid = {substation_fid}")
     row_lv = cursor_lv.fetchone()
     if row_lv is not None:
         net_data.substation_geom = row_lv[1]
 
-    # Filter to wire edges only
     incident_edges_filter = []
     for edge in incident_edges:
         cursor_lv.execute(f"SELECT * FROM lv_assets WHERE fid = {edge}")
@@ -86,132 +205,187 @@ def dfs_only_instrumented(substation_fid, flux_db_path, log_batch, stats, max_re
         if edge_details is not None and edge_details[-1] == 'edge':
             incident_edges_filter.append(edge)
 
-    # Run DFS with stats
+    timings["t_setup"] = time.perf_counter() - t0
+
+    # --- Stage 2: Way check ---
+    t0 = time.perf_counter()
+    for edge in incident_edges_filter:
+        flux_way_check(edge, cursor_net)
+    timings["t_way_check"] = time.perf_counter() - t0
+
+    # --- Stage 3: DFS ---
+    t0 = time.perf_counter()
+    stats.started_at = time.perf_counter()
+
     for e in incident_edges_filter:
         DFS(net_data, log_batch, e, cursor_net, cursor_lv,
             cursor_flux, connection_flux, 0,
-            max_recursion_depth=max_recursion_depth, hyper_edges=None,
-            stats=stats, verbose=verbose)
+            max_recursion_depth=2000, hyper_edges=None,
+            stats=stats)
 
     net_data.substation = substation_fid
+    net_data.dfs_stats = stats
+    timings["t_dfs"] = time.perf_counter() - t0
+
+    # --- Stage 4: DFS stats ---
+    t0 = time.perf_counter()
+    log_stats_of_dfs(net_data, log_batch)
+    timings["t_dfs_stats"] = time.perf_counter() - t0
+
+    # --- Stage 5: NetworkX ---
+    t0 = time.perf_counter()
+    config = ConfigManager('gridstock/config.yaml')
+    pnet = DistributionNetwork(substation_fid, log_batch)
+    pnet.get_substation_networkx(net_data)
+    timings["t_networkx"] = time.perf_counter() - t0
+
+    # --- Stage 6: Pandapower ---
+    t0 = time.perf_counter()
+    pnet.create_ppnetwork(config)
+    pnet.check_pandapower_network()
+    timings["t_pandapower"] = time.perf_counter() - t0
+
+    # --- Stage 7: Simulation ---
+    t0 = time.perf_counter()
+    pnet.simulate_ppnetwork(config)
+    timings["t_simulation"] = time.perf_counter() - t0
 
     # Clean up
     cursor_lv.close(); conn_lv.close()
     cursor_flux.close(); connection_flux.close()
     cursor_net.close(); connection_net.close()
 
-    return net_data
+    return net_data, timings
 
 
-def format_branching(branching_list):
-    """Summarise hyper edge branching as a distribution string."""
-    if not branching_list:
-        return "none"
-    counts = Counter(branching_list)
-    return ", ".join(f"{k}-way: {v}" for k, v in sorted(counts.items()))
+# ---------------------------------------------------------------------------
+# Summary printing
+# ---------------------------------------------------------------------------
+
+def print_summary(results_conn, n_total):
+    """Print aggregate summary from the results DB."""
+    cur = results_conn.cursor()
+
+    counts = cur.execute(
+        "SELECT status, COUNT(*) FROM results GROUP BY status"
+    ).fetchall()
+    done = sum(c for _, c in counts)
+
+    print(f"\n  Progress: {done}/{n_total} "
+          f"({100*done/n_total:.1f}%)" if n_total else "")
+    for status, count in counts:
+        avg = cur.execute(
+            "SELECT ROUND(AVG(t_total), 2) FROM results WHERE status=?",
+            (status,)
+        ).fetchone()[0]
+        print(f"    {status:>15s}: {count:>5d}  avg {avg}s")
+
+    ok_stats = cur.execute("""
+        SELECT COUNT(*), ROUND(MIN(t_total),2), ROUND(AVG(t_total),2),
+               ROUND(MAX(t_total),2), ROUND(SUM(t_total),1),
+               SUM(nodes), ROUND(MAX(peak_memory_mb),1),
+               ROUND(AVG(t_dfs),2), ROUND(AVG(t_pandapower),2)
+        FROM results WHERE status='ok'
+    """).fetchone()
+
+    if ok_stats and ok_stats[0] > 0:
+        n, tmin, tavg, tmax, tsum, nodes, mem, dfs_avg, pp_avg = ok_stats
+        print(f"    OK timing:  min={tmin}s  avg={tavg}s  max={tmax}s  total={tsum}s")
+        print(f"    OK nodes:   {nodes} total across {n} substations")
+        print(f"    Peak mem:   {mem} MB")
+        print(f"    Avg stage:  DFS={dfs_avg}s  pandapower={pp_avg}s")
+
+    # Show top 5 errors by frequency
+    errors = cur.execute("""
+        SELECT error, COUNT(*) as cnt FROM results
+        WHERE status != 'ok' AND error != ''
+        GROUP BY error ORDER BY cnt DESC LIMIT 5
+    """).fetchall()
+    if errors:
+        print(f"    Top errors:")
+        for err, cnt in errors:
+            print(f"      [{cnt:>3d}x] {err[:80]}")
 
 
-def print_report(results):
-    """Print human-readable diagnostic report."""
-    print("\n" + "=" * 90)
-    print(f"DFS DIAGNOSTIC REPORT  --  {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    print("=" * 90)
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
-    # Group results
-    groups = {}
-    for r in results:
-        groups.setdefault(r["group"], []).append(r)
+def main():
+    parser = argparse.ArgumentParser(description="Large-scale DFS diagnostic")
+    parser.add_argument("--db", default="results/diagnostic.sqlite",
+                        help="Output SQLite path (default: results/diagnostic.sqlite)")
+    parser.add_argument("--limit", type=int, default=0,
+                        help="Max substations to process (0 = all)")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for shuffle order")
+    parser.add_argument("--summary-every", type=int, default=100,
+                        help="Print summary every N substations")
+    args = parser.parse_args()
 
-    for group_name, group_results in groups.items():
-        print(f"\n--- {group_name.upper()} ({len(group_results)}) ---\n")
-        for r in group_results:
-            print(f"  FID {r['fid']}: {r['status'].upper()} in {r['t_total']:.2f}s")
-            print(f"    Calls: {r['total_calls']} total "
-                  f"({r['node_calls']} node, {r['edge_calls']} edge, "
-                  f"{r['hyper_edge_calls']} hyper)")
-            if r['status'] != 'error':
-                print(f"    Network: {r['nodes']} nodes, {r['edges']} edges, "
-                      f"{r['service_points']} SPs")
-                print(f"    Max depth: {r['max_depth']}, "
-                      f"depth limit hits: {r['depth_limit_hits']}")
-            print(f"    Memory: {r['peak_memory_mb']:.1f} MB peak")
-            if r['redundant_node_visits'] > 0 or r['both_nodes_visited'] > 0:
-                print(f"    Redundant: {r['redundant_node_visits']} node re-entries, "
-                      f"{r['redundant_edge_visits']} edge re-entries, "
-                      f"{r['both_nodes_visited']} both-visited")
-            if r['hyper_edge_calls'] > 0:
-                print(f"    Hyper edges: {r['hyper_edge_calls']} "
-                      f"({format_branching(r['branching_raw'])})")
-            if r['error']:
-                print(f"    Error: {r['error']}")
-            print()
-
-    # Aggregate summary
-    ok = [r for r in results if r['status'] == 'ok']
-    errs = [r for r in results if r['status'] != 'ok']
-
-    print("=" * 90)
-    print(f"SUMMARY: {len(ok)}/{len(results)} ok, {len(errs)} failed")
-    if ok:
-        times = [r['t_total'] for r in ok]
-        nodes = [r['nodes'] for r in ok]
-        calls = [r['total_calls'] for r in ok]
-        mems = [r['peak_memory_mb'] for r in ok]
-        print(f"  Time:   min={min(times):.2f}  median={sorted(times)[len(times)//2]:.2f}  "
-              f"max={max(times):.2f}  total={sum(times):.1f}s")
-        print(f"  Nodes:  min={min(nodes)}  median={sorted(nodes)[len(nodes)//2]}  "
-              f"max={max(nodes)}  total={sum(nodes)}")
-        print(f"  Calls:  min={min(calls)}  median={sorted(calls)[len(calls)//2]}  "
-              f"max={max(calls)}  total={sum(calls)}")
-        print(f"  Memory: min={min(mems):.1f}  median={sorted(mems)[len(mems)//2]:.1f}  "
-              f"max={max(mems):.1f} MB")
-    if errs:
-        print(f"  Failures:")
-        for r in errs:
-            print(f"    {r['fid']} ({r['group']}): {r['status']} - {r['error'][:80]}")
-    print("=" * 90)
-
-
-def run_diagnostic():
     os.makedirs("results", exist_ok=True)
     os.makedirs("data/temp", exist_ok=True)
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path = f"results/diagnostic_{timestamp}.csv"
+    # Load FIDs and shuffle
+    print("Loading substation FIDs from lv_assets...")
+    all_fids = load_all_substation_fids()
+    random.seed(args.seed)
+    random.shuffle(all_fids)
+    print(f"  Found {len(all_fids)} substations")
+
+    # Open results DB and check for resume
+    results_conn = init_results_db(args.db)
+    completed = get_completed_fids(results_conn)
+    fids_to_run = [f for f in all_fids if f not in completed]
+
+    if args.limit > 0:
+        fids_to_run = fids_to_run[:args.limit]
+
+    print(f"  Already completed: {len(completed)}")
+    print(f"  Remaining to run:  {len(fids_to_run)}")
+    n_total = len(completed) + len(fids_to_run)
+
+    if not fids_to_run:
+        print("Nothing to do.")
+        print_summary(results_conn, n_total)
+        results_conn.close()
+        return
+
+    log_event(results_conn, "run_started",
+              f"{len(fids_to_run)} substations, limit={args.limit}")
+
     flux_db_path = os.path.join("data", "temp", "flux_lines_diag.sqlite")
 
-    all_fids = ([(fid, "control") for fid in CONTROL_SUBS] +
-                [(fid, "problem") for fid in PROBLEM_SUBS] +
-                [(fid, "benchmark") for fid in BENCHMARK_SUBS] +
-                [(fid, "random") for fid in RANDOM_SUBS])
-
-    results = []
-    print(f"DFS Diagnostic: {len(all_fids)} substations "
-          f"({len(CONTROL_SUBS)} control, {len(PROBLEM_SUBS)} problem, "
-          f"{len(BENCHMARK_SUBS)} benchmark, {len(RANDOM_SUBS)} random)")
-    print(f"Budget: 50,000 calls / 120s per substation")
+    print(f"\nStarting at {datetime.now().strftime('%H:%M:%S')}")
+    print(f"Results: {args.db}")
     print("-" * 90)
+    sys.stdout.flush()
 
-    for i, (fid, group) in enumerate(all_fids):
+    run_start = time.perf_counter()
+
+    for i, fid in enumerate(fids_to_run):
         log_batch = LogBatch(fid)
         stats = DFSStats()
-        stats.started_at = time.perf_counter()
 
         row = {
-            "fid": fid, "group": group, "status": "error",
+            "fid": fid, "status": "error",
             "nodes": 0, "edges": 0, "service_points": 0, "incidence_rows": 0,
-            "t_total": 0.0,
             "total_calls": 0, "node_calls": 0, "edge_calls": 0,
             "hyper_edge_calls": 0, "max_depth": 0, "depth_limit_hits": 0,
             "redundant_node_visits": 0, "redundant_edge_visits": 0,
             "both_nodes_visited": 0, "flux_returns": 0, "substation_returns": 0,
-            "peak_memory_mb": 0.0, "branching_raw": [], "error": "",
+            "t_total": 0.0, "t_setup": 0.0, "t_way_check": 0.0,
+            "t_dfs": 0.0, "t_dfs_stats": 0.0, "t_networkx": 0.0,
+            "t_pandapower": 0.0, "t_simulation": 0.0,
+            "peak_memory_mb": 0.0, "error": "",
+            "completed_at": "",
         }
 
         tracemalloc.start()
+        t0 = time.perf_counter()
+
         try:
-            t0 = time.perf_counter()
-            net_data = dfs_only_instrumented(fid, flux_db_path, log_batch, stats, verbose=False)
+            net_data, timings = run_full_pipeline(fid, flux_db_path, log_batch, stats)
             t_total = time.perf_counter() - t0
 
             row["status"] = "ok"
@@ -220,27 +394,30 @@ def run_diagnostic():
             row["service_points"] = len([n for n in net_data.node_list if n[2] == 'Service Point'])
             row["incidence_rows"] = len(net_data.incidence_list)
             row["t_total"] = round(t_total, 3)
+            for k, v in timings.items():
+                row[k] = round(v, 3)
 
-            tag = f"{row['nodes']:>5d} nodes  {row['edges']:>5d} edges  {t_total:.2f}s"
-            print(f"  [{i+1:2d}/{len(all_fids)}] {fid} ({group:>7s})  OK  {tag}")
+            print(f"  [{len(completed)+i+1:>5d}/{n_total}] {fid}  OK  "
+                  f"{t_total:>6.2f}s  {row['nodes']:>5d}n  {row['edges']:>5d}e  "
+                  f"dfs={timings['t_dfs']:.2f}  pp={timings['t_pandapower']:.2f}")
 
         except DFSBudgetExceeded:
             t_total = time.perf_counter() - t0
             row["status"] = "budget_exceeded"
             row["t_total"] = round(t_total, 3)
-            print(f"  [{i+1:2d}/{len(all_fids)}] {fid} ({group:>7s})  "
-                  f"BUDGET EXCEEDED  {stats.total_calls} calls  {t_total:.1f}s  "
-                  f"{stats.hyper_edge_calls} hyper")
+            row["error"] = f"{stats.total_calls} calls, {stats.hyper_edge_calls} hyper"
+            print(f"  [{len(completed)+i+1:>5d}/{n_total}] {fid}  BUDGET  "
+                  f"{t_total:>6.1f}s  {stats.total_calls} calls")
 
         except Exception as e:
             t_total = time.perf_counter() - t0
             row["status"] = "error"
             row["t_total"] = round(t_total, 3)
             row["error"] = str(e)[:200]
-            print(f"  [{i+1:2d}/{len(all_fids)}] {fid} ({group:>7s})  ERROR: {e}")
+            print(f"  [{len(completed)+i+1:>5d}/{n_total}] {fid}  ERROR  "
+                  f"{t_total:>6.1f}s  {str(e)[:60]}")
 
         finally:
-            # Capture final memory snapshot
             try:
                 _, peak = tracemalloc.get_traced_memory()
                 stats.peak_memory_mb = max(stats.peak_memory_mb, peak / 1024 / 1024)
@@ -248,7 +425,7 @@ def run_diagnostic():
                 pass
             tracemalloc.stop()
 
-        # Copy stats into row
+        # Copy DFS stats into row
         row["total_calls"] = stats.total_calls
         row["node_calls"] = stats.node_calls
         row["edge_calls"] = stats.edge_calls
@@ -261,31 +438,37 @@ def run_diagnostic():
         row["flux_returns"] = stats.flux_returns
         row["substation_returns"] = stats.substation_returns
         row["peak_memory_mb"] = round(stats.peak_memory_mb, 1)
-        row["branching_raw"] = stats.hyper_edge_branching
+        row["completed_at"] = datetime.now().isoformat()
 
-        results.append(row)
+        # Write immediately
+        write_result(results_conn, row)
+        sys.stdout.flush()
 
-    # Write CSV (exclude branching_raw list, add summary string instead)
-    csv_fields = [
-        "fid", "group", "status", "nodes", "edges", "service_points",
-        "incidence_rows", "t_total", "total_calls", "node_calls", "edge_calls",
-        "hyper_edge_calls", "max_depth", "depth_limit_hits",
-        "redundant_node_visits", "redundant_edge_visits", "both_nodes_visited",
-        "flux_returns", "substation_returns", "peak_memory_mb",
-        "branching_summary", "error",
-    ]
-    with open(out_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=csv_fields, extrasaction='ignore')
-        writer.writeheader()
-        for r in results:
-            r["branching_summary"] = format_branching(r["branching_raw"])
-            writer.writerow(r)
+        # Periodic summary
+        if (i + 1) % args.summary_every == 0:
+            elapsed = time.perf_counter() - run_start
+            rate = (i + 1) / elapsed
+            remaining = (len(fids_to_run) - i - 1) / rate if rate > 0 else 0
+            print(f"\n  --- After {i+1} substations ({elapsed:.0f}s elapsed, "
+                  f"~{remaining/3600:.1f}h remaining) ---")
+            print_summary(results_conn, n_total)
+            print()
+            log_event(results_conn, "checkpoint", f"{i+1} done, {elapsed:.0f}s elapsed")
 
-    print(f"\nCSV: {out_path}")
+    # Final summary
+    total_elapsed = time.perf_counter() - run_start
+    log_event(results_conn, "run_finished",
+              f"{len(fids_to_run)} substations in {total_elapsed:.0f}s")
 
-    # Print full report
-    print_report(results)
+    print(f"\n{'='*90}")
+    print(f"FINISHED at {datetime.now().strftime('%H:%M:%S')}  "
+          f"({total_elapsed:.0f}s elapsed)")
+    print_summary(results_conn, n_total)
+    print(f"\nResults: {args.db}")
+    print(f"{'='*90}")
+
+    results_conn.close()
 
 
 if __name__ == "__main__":
-    run_diagnostic()
+    main()
