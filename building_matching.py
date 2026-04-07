@@ -19,44 +19,58 @@ from pathlib import Path
 from tqdm import tqdm
 
 
-def get_building_geom(buffered, buildings_path="data/all_buildings_in_enwl_27700.parquet", buffer_scale=1.1):
+# ── Per-worker building parquet cache ─────────────────────────────
+# When running under mp.Pool with _init_worker as the initializer,
+# each worker reads the 234 MB parquet once and reuses it for every
+# substation assigned to that process.
+
+_BUILDINGS_CACHE = None
+
+_BUILDINGS_COLUMNS = ["uprn", "toid", "activity_type", "activity_type_2", "geometry"]
+
+
+def _init_worker(buildings_path):
+    """Pool initializer: load buildings parquet once per worker process."""
+    global _BUILDINGS_CACHE
+    _BUILDINGS_CACHE = gpd.read_parquet(
+        buildings_path, columns=_BUILDINGS_COLUMNS,
+    )
+    _BUILDINGS_CACHE.sindex  # pre-build spatial index
+
+
+def get_building_geom(buffered, buildings_path="data/all_buildings_in_enwl_27700_bbox.parquet"):
     """
-    Given a network GeoDataFrame or NetworkX graph with geometry attributes,
-    finds the outer boundary of the network, buffers it out by a percentage,
-    and returns the subset of building geometries from a Parquet file that fall within it.
-    
+    Return building footprints that fall within a buffered network area.
+
+    Uses the per-worker cache if available (parallel mode), otherwise
+    reads from parquet with bbox pushdown (single-FID / serial mode).
+
     Parameters
     ----------
-    network : GeoDataFrame or networkx.Graph
-        The mapped network. Must have a 'geometry' column or geometry attributes.
+    buffered : shapely.geometry
+        Buffered convex hull of the network (EPSG:27700).
     buildings_path : str
         Path to the GeoParquet file containing building geometries.
-    buffer_scale : float
-        Scale factor to buffer the network area (1.1 = +10% area).
-    
+
     Returns
     -------
     GeoDataFrame
         Subset of buildings within the buffered network area.
     """
-    # --- 1️⃣ Get all geometries for this network ---
-    
-    
-    # simpler (less precise but more intuitive):
-    # buffered = outline.buffer(0.001)  # degrees or meters depending on CRS
-
-    # --- 3️⃣ Read buildings only within bounding box of buffered area ---
     minx, miny, maxx, maxy = buffered.bounds
-    buildings = gpd.read_parquet(buildings_path, columns=["uprn", "toid", "activity_type","activity_type_2", "geometry"])
-    buildings = buildings.cx[minx:maxx, miny:maxy]  # bbox crop
 
-    # --- 4️⃣ Filter precisely to those within the buffer ---
-    buildings_within = buildings[buildings.within(buffered)]
+    if _BUILDINGS_CACHE is not None:
+        # Parallel mode — fast spatial filter against in-memory cache
+        buildings = _BUILDINGS_CACHE.cx[minx:maxx, miny:maxy]
+    else:
+        # Serial / single-FID mode — bbox pushdown (requires GeoParquet
+        # with bbox covering column; see data/all_buildings_*_bbox.parquet)
+        buildings = gpd.read_parquet(
+            buildings_path, columns=_BUILDINGS_COLUMNS,
+            bbox=(minx, miny, maxx, maxy),
+        )
 
-    # print(f"Loaded {len(buildings_within)} buildings within network area.")
-
-
-    return buildings_within
+    return buildings[buildings.within(buffered)]
 
 
 
@@ -108,7 +122,7 @@ def get_buildings_near_fid(
     
 
     # # Select buildings within the buffer
-    building_geom = get_building_geom(outline_buffered, buffer_scale=buffer_scale)
+    building_geom = get_building_geom(outline_buffered)
 
     sel_3857 = building_geom.to_crs(3857)
     buffer_3857 = gpd.GeoSeries([outline_buffered], crs=27700).to_crs(3857)
@@ -375,7 +389,12 @@ def process_fid(fid, sql_fname="results/graph.sqlite",
 
         network = MappedNetwork()
         network.load_from_sqlite(fid, sql_fname)
-        print(f"Substation {fid}: network obtained.", flush=True)
+
+        if not network.service_points:
+            return {
+                "fid": fid, "status": "skipped",
+                "reason": "no service points",
+            }
 
         building_geoms, buffer_outline = get_buildings_near_fid(network, fid, buffer_scale=1.7)
         print(f"Substation {fid}: {len(building_geoms)} buildings found near network.", flush=True)
@@ -417,9 +436,13 @@ def process_fid(fid, sql_fname="results/graph.sqlite",
         return {"fid": fid, "status": "failed", "error": str(e)}
 
 
-def run_parallel(fids, sql_fname="results/graph.sqlite", max_workers=None):
+def run_parallel(fids, sql_fname="results/graph.sqlite", max_workers=None,
+                 buildings_path="data/all_buildings_in_enwl_27700_bbox.parquet"):
     """
     Run process_fid() across a list of FIDs in parallel with tqdm progress.
+
+    Each worker loads the buildings parquet once at startup via _init_worker,
+    then reuses the cached DataFrame for all substations it processes.
     """
     if max_workers is None:
         max_workers = max(1, os.cpu_count() - 5)
@@ -427,7 +450,11 @@ def run_parallel(fids, sql_fname="results/graph.sqlite", max_workers=None):
     print(f" Running with {max_workers} workers")
 
     results = []
-    with mp.Pool(processes=max_workers) as pool:
+    with mp.Pool(
+        processes=max_workers,
+        initializer=_init_worker,
+        initargs=(buildings_path,),
+    ) as pool:
         for result in tqdm(
             pool.imap_unordered(
                 process_fid_wrapper, [(fid, sql_fname) for fid in fids]
