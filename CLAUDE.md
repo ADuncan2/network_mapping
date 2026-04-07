@@ -38,7 +38,9 @@
 ### Output data (in `results/`, gitignored)
 
 - `graph.sqlite` — Mapped network incidence lists, edge/node properties, mapped substations (WAL mode)
-- `summary.csv` — Per-substation mapping summary stats
+- `summary.csv` — Per-substation stats: location (lat/lon), substation properties (type/rating), network size (nodes/edges/lengths by type), DFS diagnostics, validity flags (disconnected components, orphan nodes, budget exceeded)
+- `building_matches.csv` — Per-service-point building match results (substation_fid, service_point_fid, toid, match_method, etc.)
+- `building_match_summary.csv` — Per-substation building match summary (match_rate, pct_overlap, etc.)
 - `temp/` — Per-worker flux line databases and validation temp files
 
 ## Tech Stack

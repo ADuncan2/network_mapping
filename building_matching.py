@@ -363,9 +363,12 @@ def plot_network_on_map(network, substation_fid=None, building_geoms=None, crs="
 
 
 
-def process_fid(fid, sql_fname="results/graph.sqlite"):
+def process_fid(fid, sql_fname="results/graph.sqlite",
+                matches_path="results/building_matches.csv"):
     """
-    Process one substation FID and return a result dict.
+    Process one substation FID: load network, match buildings, persist results.
+
+    Returns a dict with status and per-substation match summary stats.
     """
     try:
         time_start = time.time()
@@ -377,13 +380,38 @@ def process_fid(fid, sql_fname="results/graph.sqlite"):
         building_geoms, buffer_outline = get_buildings_near_fid(network, fid, buffer_scale=1.7)
         print(f"Substation {fid}: {len(building_geoms)} buildings found near network.", flush=True)
 
-        match_buildings_to_network(network, building_geoms)
+        match_df = match_buildings_to_network(network, building_geoms)
         print(f"Substation {fid}: building matching complete.", flush=True)
 
-        # plot_network_on_map(network, substation_fid=fid, building_geoms=building_geoms)
+        # --- Persist per-service-point matches ---
+        match_df.insert(0, "substation_fid", fid)
+        # Select only the columns we want to save
+        save_cols = ["substation_fid", "service_point_fid", "toid", "uprn",
+                     "match_method", "dist_to_building", "activity_type"]
+        # Keep only columns that exist (uprn/activity_type may not be present yet)
+        save_cols = [c for c in save_cols if c in match_df.columns]
+        out_df = match_df[save_cols]
+
+        file_exists = os.path.exists(matches_path)
+        out_df.to_csv(matches_path, mode="a", header=not file_exists, index=False)
+
+        # --- Compute per-substation summary ---
+        n_matched = int(match_df["toid"].notna().sum()) if "toid" in match_df.columns else 0
+        n_total = len(match_df)
+        n_overlap = int((match_df["match_method"] == "overlap").sum())
+        match_rate = round(n_matched / n_total, 4) if n_total > 0 else 0.0
+        pct_overlap = round(n_overlap / n_matched, 4) if n_matched > 0 else 0.0
 
         elapsed = time.time() - time_start
-        return {"fid": fid, "status": "success", "time": elapsed}
+        return {
+            "fid": fid,
+            "status": "success",
+            "time": elapsed,
+            "buildings_matched": n_matched,
+            "buildings_unmatched": n_total - n_matched,
+            "match_rate": match_rate,
+            "pct_overlap": pct_overlap,
+        }
 
     except Exception as e:
         return {"fid": fid, "status": "failed", "error": str(e)}
@@ -416,33 +444,27 @@ def process_fid_wrapper(args):
     Wrapper to unpack args for multiprocessing (avoids lambda pickling issues).
     """
     fid, sql_fname = args
-    return process_fid(fid, sql_fname)
+    return process_fid(fid, sql_fname=sql_fname)
 
 
 def main():
     # --- Load substation FIDs ---
-    # These are the FIDs of all the substations that appear in graph.sqlite
     summary_path = Path("results/summary.csv")
-    # Load all summary FIDs where column 'warnings_or_errors' is False
     summary_df = pd.read_csv(summary_path)
 
     all_fids = summary_df["substation_fid"].astype(str).tolist()
 
+    # # --- Run parallel mapping ---
+    # results = run_parallel(all_fids, sql_fname="results/graph.sqlite")
 
-
-    # # # --- Run parallel mapping ---
-    # # results = run_parallel(remaining_fids, sql_fname="results/graph.sqlite")
-
-    # # --- Or run serially for debugging ---
+    # --- Or run serially for debugging ---
     fid = all_fids[5]
-    results = process_fid(fid, sql_fname="results/graph.sqlite")
+    results = [process_fid(fid, sql_fname="results/graph.sqlite")]
 
-
-
-    # --- Save summary ---
-    # results_df = pd.DataFrame(results)
-    # results_df.to_csv("data/mapping_summary.csv", index=False)
-    # print("Mapping complete. Summary saved to data/mapping_summary.csv")
+    # --- Save per-substation building match summary ---
+    results_df = pd.DataFrame(results)
+    results_df.to_csv("results/building_match_summary.csv", index=False)
+    print(f"Building matching complete. Summary saved to results/building_match_summary.csv")
 
 
 if __name__ == "__main__":

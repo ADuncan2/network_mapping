@@ -21,6 +21,11 @@ import logging
 import time
 import tracemalloc
 from dataclasses import dataclass, field
+import networkx as nx
+from pyproj import Transformer
+
+# Module-level transformer (reused across calls, thread-safe for reads)
+_to_wgs84 = Transformer.from_crs("EPSG:27700", "EPSG:4326", always_xy=True)
 
 
 @dataclass
@@ -724,29 +729,42 @@ def flux_way_check(fid, cursor):
 def length_of_edges(
         net_data: NetworkData,
         log_batch: logging.Logger
-        ) -> int:
+        ) -> dict:
     """
-    Function to log the length of all edges in the network.
+    Calculate total and per-type edge lengths in km.
+
+    Returns dict with keys: cable_length_km, conductor_length_km, service_length_km
     """
     total_length = 0.0
+    conductor_length = 0.0
+    service_length = 0.0
     for edge in net_data.edge_list:
         edge_geom = wkb.loads(edge[1])
-        total_length += edge_geom.length
-    
+        length = edge_geom.length
+        total_length += length
+        asset_type = edge[2]  # Asset_Type column
+        if asset_type == "LV Conductor":
+            conductor_length += length
+        elif asset_type == "LV Service":
+            service_length += length
+
     log_batch.add_log(
         logging.INFO,
         f"Total length of edges in the network: {(total_length/1000):.2f} km"
         )
-    DFS_edge_length = total_length / 1000  # Convert to km
-    return DFS_edge_length
+    return {
+        "cable_length_km": round(total_length / 1000, 4),
+        "conductor_length_km": round(conductor_length / 1000, 4),
+        "service_length_km": round(service_length / 1000, 4),
+    }
 
 
 def log_stats_of_dfs(
         net_data: NetworkData,
         log_batch: logging.Logger
-        ) -> int:
+        ) -> dict:
     """
-    Function to log the stats of the DFS run.
+    Log DFS stats and return edge length breakdown dict.
     """
 
     log_batch.add_log(logging.INFO, "------- DFS stats -------")
@@ -754,37 +772,11 @@ def log_stats_of_dfs(
     service_points = [node for node in net_data.node_list if node[2] == 'Service Point']
 
     if len(service_points) == 0:
-        ## I want code here that will cause an exception to be raised if no service points are found and end this itteration
         log_batch.add_log(
-            logging.ERROR,
-            "No service points found in the network. "
-            "Please check the input data and try again."
+            logging.WARNING,
+            "No service points found in the network."
             )
-        raise ValueError("No service points found in the network.")
 
-    
-    # # Extract FIDs from node_list and edge_list
-    # node_fids = {row[0] for row in net_data.node_list}
-    # edge_fids = {row[0] for row in net_data.edge_list}
-
-    # # Check if all FIDs in incidence_list are in node_list or edge_list
-    # consistency_check = True
-    # for row in net_data.incidence_list:
-    #     for fid in row:
-    #         if fid not in node_fids and fid not in edge_fids:
-    #             log_batch.add_log(
-    #                 logging.WARNING,
-    #                 f"Incidence list contains fid {fid} that is not in node_list or edge_list."
-    #                 )
-    #             consistency_check = False
-    
-    # if consistency_check:
-    #     log_batch.add_log(
-    #         logging.INFO,
-    #         "Incidence list is consistent with node_list and edge_list."
-    #         )
-
-    # Log the stats of the DFS run
     log_batch.add_log(
         logging.INFO,
         f"DFS finished with {len(net_data.node_list)} nodes, "
@@ -792,9 +784,8 @@ def log_stats_of_dfs(
         f"{len(net_data.edge_list)} edges"
         )
 
-    # Run function to record the total length of the edges in the network
-    DFS_edge_length = length_of_edges(net_data, log_batch)
-    return DFS_edge_length
+    edge_lengths = length_of_edges(net_data, log_batch)
+    return edge_lengths
 
 def map_substation(
         substation_fid: int,
@@ -884,31 +875,85 @@ def map_substation(
 
     dfs_stats = DFSStats()
     dfs_stats.started_at = time.perf_counter()
+    budget_exceeded = False
 
-    for e in incident_edges_filter:
-        DFS(net_data, log_batch, e, cursor_net, cursor_lv_assets,
-            cursor_flux, connection_flux, 0,
-            max_recursion_depth=max_recursion_depth, hyper_edges=None,
-            stats=dfs_stats)
-        
+    try:
+        for e in incident_edges_filter:
+            DFS(net_data, log_batch, e, cursor_net, cursor_lv_assets,
+                cursor_flux, connection_flux, 0,
+                max_recursion_depth=max_recursion_depth, hyper_edges=None,
+                stats=dfs_stats)
+    except DFSBudgetExceeded:
+        budget_exceeded = True
+        log_batch.add_log(logging.WARNING,
+                          f"DFS budget exceeded after {dfs_stats.total_calls} calls")
+
     net_data.substation = substation_fid
     net_data.dfs_stats = dfs_stats
 
     ## Check the net_data object to make sure it's consistent
-    DFS_edge_length = log_stats_of_dfs(net_data, log_batch)
+    edge_lengths = log_stats_of_dfs(net_data, log_batch)
 
-    ## Count service points from the node list
+    ## Count node types from the node list
     service_point_count = len([n for n in net_data.node_list if n[2] == 'Service Point'])
+    switch_count = len([n for n in net_data.node_list if n[2] == 'Switch'])
+
+    # --- Location: convert substation centroid to lat/lon ---
+    lat, lon = None, None
+    if row_lv is not None:
+        try:
+            centroid = wkb.loads(row_lv[1]).centroid
+            lon, lat = _to_wgs84.transform(centroid.x, centroid.y)
+            lat = round(lat, 6)
+            lon = round(lon, 6)
+        except Exception:
+            pass
+
+    # --- Build lightweight NetworkX graph for topology checks ---
+    G = nx.Graph()
+    for row in net_data.node_list:
+        G.add_node(row[0])
+    for edge_fid, node_from, node_to in net_data.incidence_list:
+        G.add_edge(node_from, node_to)
+    # Add substation node (it's in visited_nodes but not node_list)
+    G.add_node(substation_fid)
+
+    n_components = nx.number_connected_components(G) if G.number_of_nodes() > 0 else 0
+    n_orphans = len(list(nx.isolates(G)))
+
+    # --- DFS timing ---
+    dfs_elapsed = round(time.perf_counter() - dfs_stats.started_at, 3)
 
     ## Write summary statistics to a csv file
     summary_stats = {
+        # Location
         "substation_fid": substation_fid,
-        "substation_geom": net_data.substation_coord,
-        "warnings_or_errors": any(log["level"] >= logging.WARNING for log in log_batch.messages),
+        "lat": lat,
+        "lon": lon,
+        # Substation properties
+        "substation_type": row_lv[17] if row_lv else None,      # Substation_Type
+        "rating_kva": row_lv[15] if row_lv else None,           # Rating_Normal
+        "infeed_voltage": row_lv[18] if row_lv else None,       # Infeed_Voltage
+        # Network size
         "nodes": len(net_data.node_list),
         "edges": len(net_data.edge_list),
         "service_points": service_point_count,
-        "DFS_edge_length_km": DFS_edge_length,
+        "switches": switch_count,
+        **edge_lengths,  # cable_length_km, conductor_length_km, service_length_km
+        # DFS diagnostics
+        "dfs_calls": dfs_stats.total_calls,
+        "dfs_time_s": dfs_elapsed,
+        "dfs_max_depth": dfs_stats.max_depth_seen,
+        "depth_limit_hits": dfs_stats.depth_limit_hits,
+        "hyper_edges": dfs_stats.hyper_edge_calls,
+        "adjacent_substations": dfs_stats.substation_returns,
+        # Validity flags
+        "warning_count": sum(1 for m in log_batch.messages if m["level"] == logging.WARNING),
+        "error_count": sum(1 for m in log_batch.messages if m["level"] == logging.ERROR),
+        "budget_exceeded": budget_exceeded,
+        "disconnected_components": n_components,
+        "orphan_nodes": n_orphans,
+        "redundant_visits": dfs_stats.redundant_node_visits + dfs_stats.redundant_edge_visits,
     }
 
     # Save the summary stats in the net_data object to allow it to be saved by the worker
