@@ -1125,10 +1125,10 @@ def copy_conn_to_lv(report=None) -> None:
 # Step 8: create_graph_db (unchanged)
 # ──────────────────────────────────────────────
 
-def create_graph_db() -> None:
+def create_graph_db(fname: str = "data/graph.sqlite") -> None:
     """Create empty graph.sqlite output database with WAL mode."""
 
-    file_path = "data/graph.sqlite"
+    file_path = fname
     if os.path.exists(file_path):
         os.remove(file_path)
 

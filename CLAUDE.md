@@ -21,7 +21,7 @@
 | `dbcleaning.py` | DB setup: `create_lv_db()`, `create_graph_db()`, substation/switch simplification |
 | `network_loader.py` | `MappedNetwork` class — loads mapped networks from `graph.sqlite` into NetworkX |
 
-### Diagnostic scripts
+### Validation scripts (`validation/`)
 
 | File | Purpose |
 |------|---------|
