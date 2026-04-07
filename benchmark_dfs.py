@@ -1,6 +1,6 @@
 """
-Benchmark script for full mapping pipeline.
-Measures all stages: DFS, NetworkX, pandapower, simulation.
+Benchmark script for the mapping pipeline.
+Measures: DB setup, way check, DFS, stats logging, NetworkX graph.
 Run before and after code changes to compare performance.
 
 Usage:
@@ -19,14 +19,14 @@ import logging
 from datetime import datetime
 
 from gridstock.mapfuncs import (
-    map_substation, DFSStats, DFSBudgetExceeded,
+    DFSStats, DFSBudgetExceeded,
     log_stats_of_dfs, flux_way_check, DFS,
-    ConfigManager, DistributionNetwork,
 )
 from gridstock.recorder import NetworkData
+from gridstock.network_loader import MappedNetwork
 from gridstock.dbcleaning import create_station_flux_lines_table, reset_station_flux_lines_table
 
-# 40 substations: 18 benchmark + 6 former problem + 10 random + 6 extra
+# 40 substations: 18 benchmark + 6 former problem + 16 random
 BENCHMARK_FIDS = [
     # Original benchmark set (18)
     11374876, 11375741, 11376677, 11377424, 11377484, 11377527,
@@ -62,10 +62,10 @@ class LogBatch:
         return datetime.now() - self.start_time
 
 
-def benchmark_full_pipeline(substation_fid, flux_db_path, log_batch):
-    """Run the full mapping pipeline with per-stage timing.
+def benchmark_pipeline(substation_fid, flux_db_path, log_batch):
+    """Run the mapping pipeline with per-stage timing.
 
-    Returns a dict with stage timings and network stats.
+    Returns (net_data, dfs_stats, timings).
     """
     timings = {}
 
@@ -112,10 +112,8 @@ def benchmark_full_pipeline(substation_fid, flux_db_path, log_batch):
 
     # --- Stage 2: Way check ---
     t0 = time.perf_counter()
-    way_status = []
     for edge in incident_edges_filter:
-        way_bool = flux_way_check(edge, cursor_net)
-        way_status.append(way_bool)
+        flux_way_check(edge, cursor_net)
     timings["t_way_check"] = time.perf_counter() - t0
 
     # --- Stage 3: DFS ---
@@ -135,38 +133,34 @@ def benchmark_full_pipeline(substation_fid, flux_db_path, log_batch):
 
     # --- Stage 4: DFS stats logging ---
     t0 = time.perf_counter()
-    DFS_edge_length = log_stats_of_dfs(net_data, log_batch)
+    log_stats_of_dfs(net_data, log_batch)
     timings["t_dfs_stats"] = time.perf_counter() - t0
 
-    # --- Stage 5: NetworkX graph ---
-    t0 = time.perf_counter()
-    config = ConfigManager('gridstock/config.yaml')
-    pnet = DistributionNetwork(substation_fid, log_batch)
-    pnet.get_substation_networkx(net_data)
-    timings["t_networkx"] = time.perf_counter() - t0
-
-    # --- Stage 6: Pandapower network ---
-    t0 = time.perf_counter()
-    pnet.create_ppnetwork(config)
-    pnet.check_pandapower_network()
-    timings["t_pandapower"] = time.perf_counter() - t0
-
-    # --- Stage 7: Simulation ---
-    t0 = time.perf_counter()
-    pnet.simulate_ppnetwork(config)
-    timings["t_simulation"] = time.perf_counter() - t0
-
-    # Clean up
+    # Clean up DB connections used by DFS
     cursor_lv.close(); conn_lv.close()
     cursor_flux.close(); connection_flux.close()
     cursor_net.close(); connection_net.close()
 
-    return net_data, dfs_stats, pnet, timings
+    # --- Stage 5: Write to graph.sqlite and reload as NetworkX ---
+    # This tests the full round-trip: DFS results → SQLite → NetworkX
+    t0 = time.perf_counter()
+    net_data.to_sql("data/temp/bench_graph.sqlite")
+    mapped = MappedNetwork()
+    mapped.load_from_sqlite(substation_fid, "data/temp/bench_graph.sqlite")
+    timings["t_networkx"] = time.perf_counter() - t0
+
+    return net_data, dfs_stats, timings
 
 
 def run_benchmark(label=""):
     os.makedirs("results", exist_ok=True)
     os.makedirs("data/temp", exist_ok=True)
+
+    # Create a temp graph.sqlite for NetworkX round-trip test
+    from gridstock.dbcleaning import create_graph_db
+    if os.path.exists("data/temp/bench_graph.sqlite"):
+        os.remove("data/temp/bench_graph.sqlite")
+    create_graph_db("data/temp/bench_graph.sqlite")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     tag = f"_{label}" if label else ""
@@ -174,17 +168,16 @@ def run_benchmark(label=""):
 
     flux_db_path = os.path.join("data", "temp", "flux_lines_bench.sqlite")
 
-    stage_names = ["t_setup", "t_way_check", "t_dfs", "t_dfs_stats",
-                   "t_networkx", "t_pandapower", "t_simulation"]
+    stage_names = ["t_setup", "t_way_check", "t_dfs", "t_dfs_stats", "t_networkx"]
 
     results = []
-    print(f"Full pipeline benchmark: {len(BENCHMARK_FIDS)} substations")
+    print(f"Mapping benchmark: {len(BENCHMARK_FIDS)} substations")
     print(f"Output: {out_path}")
-    print("-" * 110)
+    print("-" * 90)
     print(f"{'#':>3}  {'FID':>10}  {'Status':>7}  {'Total':>6}  "
           f"{'Setup':>5}  {'Ways':>5}  {'DFS':>6}  {'Stats':>5}  "
-          f"{'NX':>5}  {'PP':>6}  {'Sim':>5}  {'Nodes':>5}  {'Edges':>5}")
-    print("-" * 110)
+          f"{'NX':>5}  {'Nodes':>5}  {'Edges':>5}")
+    print("-" * 90)
 
     t_run_start = time.perf_counter()
 
@@ -199,7 +192,7 @@ def run_benchmark(label=""):
 
         try:
             t0 = time.perf_counter()
-            net_data, dfs_stats, pnet, timings = benchmark_full_pipeline(
+            net_data, dfs_stats, timings = benchmark_pipeline(
                 fid, flux_db_path, log_batch)
             t_total = time.perf_counter() - t0
 
@@ -217,8 +210,7 @@ def run_benchmark(label=""):
             print(f"{i+1:3d}  {fid:>10d}  {'ok':>7s}  {t_total:>6.2f}  "
                   f"{timings['t_setup']:>5.2f}  {timings['t_way_check']:>5.2f}  "
                   f"{timings['t_dfs']:>6.2f}  {timings['t_dfs_stats']:>5.2f}  "
-                  f"{timings['t_networkx']:>5.2f}  {timings['t_pandapower']:>6.2f}  "
-                  f"{timings['t_simulation']:>5.2f}  "
+                  f"{timings['t_networkx']:>5.2f}  "
                   f"{row['nodes']:>5d}  {row['edges']:>5d}")
 
         except DFSBudgetExceeded as e:
@@ -253,12 +245,11 @@ def run_benchmark(label=""):
     ok = [r for r in results if r["status"] == "ok"]
     errs = [r for r in results if r["status"] != "ok"]
 
-    print("-" * 110)
+    print("-" * 90)
     print(f"\nSUMMARY: {len(ok)}/{len(results)} ok, {len(errs)} errors, "
           f"wall time {t_run_total:.1f}s")
 
     if ok:
-        # Per-stage totals
         print(f"\n  Stage totals (ok only, {len(ok)} substations):")
         for s in stage_names:
             vals = [r[s] for r in ok]

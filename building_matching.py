@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import contextily as cx
 from typing import Union
 from shapely.geometry import LineString, Point
-from gridstock.network_parsing_EEA import DistributionNetwork
+from gridstock.network_loader import MappedNetwork
 import networkx as nx
 import sys
 import time
@@ -61,7 +61,7 @@ def get_building_geom(buffered, buildings_path="data/all_buildings_in_enwl_27700
 
 
 def get_buildings_near_fid(
-    network: DistributionNetwork,
+    network: MappedNetwork,
     fid: str,
     buffer_scale: float = 1.1,
     ) -> gpd.GeoDataFrame:
@@ -139,7 +139,7 @@ def match_buildings_to_network(network, building_geoms, buffer_dist=1.0, nearest
 
     Parameters
     ----------
-    network : DistributionNetwork
+    network : MappedNetwork
         Network object with node geometries and asset_type attributes.
     building_geoms : GeoDataFrame
         Building geometries with valid CRS and (optionally) attributes like 'activity'.
@@ -170,18 +170,6 @@ def match_buildings_to_network(network, building_geoms, buffer_dist=1.0, nearest
     buildings = buildings[buildings.geometry.notnull()].reset_index(drop=True)
     buildings["building_id"] = buildings.index
 
-    ## How many unique toids are there?
-    print("Uprns:")
-    print(len(buildings["uprn"].unique()))
-
-    ## How many unique uprns?
-    print("Toids:")
-    print(len(buildings["toid"].unique()))
-
-    ## How many unique nodes are there?
-    print("Service point nodes:")
-    print(len(gdf_nodes["node_id"].unique()))
-
     # --- Test 1: Nodes overlapping buildings ---
     overlap_join = gpd.sjoin(buildings, gdf_nodes, predicate="intersects", how="left")
     mapped_overlap = overlap_join[~overlap_join["building_id"].isna()].copy()
@@ -189,7 +177,6 @@ def match_buildings_to_network(network, building_geoms, buffer_dist=1.0, nearest
 
     mapped_nodes = mapped_overlap.drop_duplicates("node_id").copy()
     unmapped_nodes = gdf_nodes.loc[~gdf_nodes["node_id"].isin(mapped_nodes["node_id"])].copy()
-    print(f"After overlap test: {len(mapped_nodes)} matched, {len(unmapped_nodes)} unmatched.")
 
     # filter out buildings already matched
     buildings = buildings[~buildings["building_id"].isin(mapped_nodes["building_id"])].copy()
@@ -208,25 +195,9 @@ def match_buildings_to_network(network, building_geoms, buffer_dist=1.0, nearest
 
         mapped_nodes = pd.concat([mapped_nodes, single_match], ignore_index=True)
         unmapped_nodes = gdf_nodes.loc[~gdf_nodes["node_id"].isin(mapped_nodes["node_id"])].copy()
-        print(f"After buffered overlap test: {len(mapped_nodes)} matched, {len(unmapped_nodes)} unmatched.")
-
-    # print(f"Matched {len(mapped_nodes)} / {len(gdf_nodes)} nodes.")
-    # print(f"Remaining unmatched: {len(unmapped_nodes)}")
-
-    # print("Match methods distribution:")
-    # print(mapped_nodes["match_method"].value_counts())
-    print("Mapped nodes preview:")
-    print(mapped_nodes.head())
-
-    ## How many rows are there in matched buildings?
-    
-
 
     ## Clean up mapped_nodes GeoDataFrame for saving/returning
     mapped_nodes_saving = mapped_nodes.copy()
-
-    print("Unmapped nodes preview:")
-    print(unmapped_nodes.head())
 
     # Add unmapped node details 
     unmapped_nodes["toid"] = None
@@ -399,8 +370,8 @@ def process_fid(fid, sql_fname="data/graph.sqlite"):
     try:
         time_start = time.time()
 
-        network = DistributionNetwork()
-        network.get_substation_networkx(fid, sql_fname)
+        network = MappedNetwork()
+        network.load_from_sqlite(fid, sql_fname)
         print(f"Substation {fid}: network obtained.", flush=True)
 
         building_geoms, buffer_outline = get_buildings_near_fid(network, fid, buffer_scale=1.7)

@@ -5,28 +5,19 @@ map networks.
 
 import os
 os.environ['USE_PYGEOS'] = '0'
-import geopandas
 import sqlite3
 from gridstock.recorder import NetworkData
-from gridstock.network_parsing import DistributionNetwork
-from gridstock.config_manager import ConfigManager
 from shapely.geometry import Point, LineString, shape
 from shapely import wkb
-from pyproj import Transformer
-import osmnx as ox
-import fiona
 import sys
 sys.setrecursionlimit(5000)
-import matplotlib.pyplot as plt
 from shapely.wkt import loads
-from matplotlib.colors import ListedColormap
 import numpy as np
 from itertools import combinations
 from gridstock.dbcleaning import (
     reset_station_flux_lines_table,
     create_station_flux_lines_table)
 import logging
-import csv
 import time
 import tracemalloc
 from dataclasses import dataclass, field
@@ -694,7 +685,6 @@ def DFS(
                         verbose=verbose,
                         )
             return
-
     return
 
 #function to check if an edge is connected to a closed way
@@ -904,37 +894,21 @@ def map_substation(
     net_data.substation = substation_fid
     net_data.dfs_stats = dfs_stats
 
-    ## Check the net_data object to make sure it's consistent, and to allow comparison with later steps of mapping to make sure data is not being lost
+    ## Check the net_data object to make sure it's consistent
     DFS_edge_length = log_stats_of_dfs(net_data, log_batch)
 
-    # Reads the current config yaml file to get settings for current run
-    config = ConfigManager('gridstock/config.yaml')
-
-    # Create a DistributionNetwork object
-    pnet = DistributionNetwork(substation_fid, log_batch)
-
-    # Create the networkx graph from the net_data object
-    pnet.get_substation_networkx(net_data)
-
-    # Create a pandapower network from the net_data object
-    pnet.create_ppnetwork(config)
-    pnet.check_pandapower_network()
-
-    # Simulate the pandapower network to check it runs
-    pnet.simulate_ppnetwork(config)
-
-    percent_difference = (1 - pnet.pp_edge_length/DFS_edge_length)  * 100 if DFS_edge_length != 0 else None
+    ## Count service points from the node list
+    service_point_count = len([n for n in net_data.node_list if n[2] == 'Service Point'])
 
     ## Write summary statistics to a csv file
     summary_stats = {
         "substation_fid": substation_fid,
         "substation_geom": net_data.substation_coord,
-        "Runs powerflow": any("converged" in log["message"] for log in log_batch.messages),
         "warnings_or_errors": any(log["level"] >= logging.WARNING for log in log_batch.messages),
-        "service_points": len(pnet.service_points),
+        "nodes": len(net_data.node_list),
+        "edges": len(net_data.edge_list),
+        "service_points": service_point_count,
         "DFS_edge_length_km": DFS_edge_length,
-        "pp_edge_length_km": pnet.pp_edge_length,
-        "percent_difference": percent_difference,
     }
 
     # Save the summary stats in the net_data object to allow it to be saved by the worker
@@ -952,52 +926,3 @@ def map_substation(
 
 
 
-def get_background_map_and_bounds(
-        centroid: Point,
-        image_fname: str,
-        dist: int | float,
-        road_color: str = "#dbdbdb",
-        bkgd_color: str = "#eef9ee",
-        bldg_color: str = "#f5d1ab"
-        ) -> tuple[float]:
-    
-    substation_centroid = list(centroid.coords)[0]
-
-    # Get the image
-    # The centroid coordinates are in easting-northing
-    # Need a function to convert them to latitude longitude
-    transformer = Transformer.from_crs('epsg:27700', 'epsg:4326')
-
-    # This is the centre of the substation in lat-lon
-    centroid_lat_lon = transformer.transform(*substation_centroid)
-
-    # Get all roads and buildings around centroid
-
-    print("Getting roads and buildings...")
-
-    gdf = ox.features_from_point(
-        centroid_lat_lon, {'building': True}, dist=dist
-        )
-    
-
-    # Plot roads around centroid
-    _, ax = ox.plot_figure_ground(point=centroid_lat_lon, dist=dist,network_type="drive", default_width=2, street_widths=None, save=False,show=False, close=True, edge_color=road_color, bgcolor=bkgd_color)
-    
-    # Plot the building footprints around centroid
-    # _, ax = ox.plot_footprints(
-    #     gdf, ax=ax, filepath=image_fname, dpi=180, save=True,
-    #     show=False, close=True, color=bldg_color, bgcolor=bkgd_color
-    #     )
-    print("runs this far")
-    # Get bounding box of the data (this will be in lat-lon)
-    bounds = gdf.total_bounds
-    
-    # Transform these bounds back into OS style
-    min_lon, min_lat, max_lon, max_lat = bounds
-    transformer = Transformer.from_crs('epsg:4326', 'epsg:27700', 
-                                    always_xy=True)
-    min_x, min_y = transformer.transform(min_lon, min_lat)
-    max_x, max_y = transformer.transform(max_lon, max_lat)
-    del(gdf)
-    return min_x, min_y, max_x, max_y
-    

@@ -33,9 +33,9 @@ from gridstock.recorder import NetworkData
 from gridstock.mapfuncs import (
     DFS, DFSStats, DFSBudgetExceeded,
     log_stats_of_dfs, flux_way_check,
-    ConfigManager, DistributionNetwork,
 )
-from gridstock.dbcleaning import create_station_flux_lines_table, reset_station_flux_lines_table
+from gridstock.network_loader import MappedNetwork
+from gridstock.dbcleaning import create_station_flux_lines_table, reset_station_flux_lines_table, create_graph_db
 
 
 # ---------------------------------------------------------------------------
@@ -67,8 +67,6 @@ CREATE TABLE IF NOT EXISTS results (
     t_dfs           REAL DEFAULT 0,
     t_dfs_stats     REAL DEFAULT 0,
     t_networkx      REAL DEFAULT 0,
-    t_pandapower    REAL DEFAULT 0,
-    t_simulation    REAL DEFAULT 0,
     peak_memory_mb  REAL DEFAULT 0,
     error           TEXT DEFAULT '',
     completed_at    TEXT
@@ -232,28 +230,18 @@ def run_full_pipeline(substation_fid, flux_db_path, log_batch, stats):
     log_stats_of_dfs(net_data, log_batch)
     timings["t_dfs_stats"] = time.perf_counter() - t0
 
-    # --- Stage 5: NetworkX ---
-    t0 = time.perf_counter()
-    config = ConfigManager('gridstock/config.yaml')
-    pnet = DistributionNetwork(substation_fid, log_batch)
-    pnet.get_substation_networkx(net_data)
-    timings["t_networkx"] = time.perf_counter() - t0
-
-    # --- Stage 6: Pandapower ---
-    t0 = time.perf_counter()
-    pnet.create_ppnetwork(config)
-    pnet.check_pandapower_network()
-    timings["t_pandapower"] = time.perf_counter() - t0
-
-    # --- Stage 7: Simulation ---
-    t0 = time.perf_counter()
-    pnet.simulate_ppnetwork(config)
-    timings["t_simulation"] = time.perf_counter() - t0
-
-    # Clean up
+    # Clean up DFS connections
     cursor_lv.close(); conn_lv.close()
     cursor_flux.close(); connection_flux.close()
     cursor_net.close(); connection_net.close()
+
+    # --- Stage 5: Write to temp graph.sqlite and reload as NetworkX ---
+    t0 = time.perf_counter()
+    diag_graph_path = "data/temp/diag_graph.sqlite"
+    net_data.to_sql(diag_graph_path)
+    mapped = MappedNetwork()
+    mapped.load_from_sqlite(substation_fid, diag_graph_path)
+    timings["t_networkx"] = time.perf_counter() - t0
 
     return net_data, timings
 
@@ -284,16 +272,16 @@ def print_summary(results_conn, n_total):
         SELECT COUNT(*), ROUND(MIN(t_total),2), ROUND(AVG(t_total),2),
                ROUND(MAX(t_total),2), ROUND(SUM(t_total),1),
                SUM(nodes), ROUND(MAX(peak_memory_mb),1),
-               ROUND(AVG(t_dfs),2), ROUND(AVG(t_pandapower),2)
+               ROUND(AVG(t_dfs),2), ROUND(AVG(t_networkx),2)
         FROM results WHERE status='ok'
     """).fetchone()
 
     if ok_stats and ok_stats[0] > 0:
-        n, tmin, tavg, tmax, tsum, nodes, mem, dfs_avg, pp_avg = ok_stats
+        n, tmin, tavg, tmax, tsum, nodes, mem, dfs_avg, nx_avg = ok_stats
         print(f"    OK timing:  min={tmin}s  avg={tavg}s  max={tmax}s  total={tsum}s")
         print(f"    OK nodes:   {nodes} total across {n} substations")
         print(f"    Peak mem:   {mem} MB")
-        print(f"    Avg stage:  DFS={dfs_avg}s  pandapower={pp_avg}s")
+        print(f"    Avg stage:  DFS={dfs_avg}s  NetworkX={nx_avg}s")
 
     # Show top 5 errors by frequency
     errors = cur.execute("""
@@ -325,6 +313,12 @@ def main():
 
     os.makedirs("results", exist_ok=True)
     os.makedirs("data/temp", exist_ok=True)
+
+    # Create temp graph.sqlite for NetworkX round-trip stage
+    diag_graph_path = "data/temp/diag_graph.sqlite"
+    if os.path.exists(diag_graph_path):
+        os.remove(diag_graph_path)
+    create_graph_db(diag_graph_path)
 
     # Load FIDs and shuffle
     print("Loading substation FIDs from lv_assets...")
@@ -376,7 +370,6 @@ def main():
             "both_nodes_visited": 0, "flux_returns": 0, "substation_returns": 0,
             "t_total": 0.0, "t_setup": 0.0, "t_way_check": 0.0,
             "t_dfs": 0.0, "t_dfs_stats": 0.0, "t_networkx": 0.0,
-            "t_pandapower": 0.0, "t_simulation": 0.0,
             "peak_memory_mb": 0.0, "error": "",
             "completed_at": "",
         }
@@ -399,7 +392,7 @@ def main():
 
             print(f"  [{len(completed)+i+1:>5d}/{n_total}] {fid}  OK  "
                   f"{t_total:>6.2f}s  {row['nodes']:>5d}n  {row['edges']:>5d}e  "
-                  f"dfs={timings['t_dfs']:.2f}  pp={timings['t_pandapower']:.2f}")
+                  f"dfs={timings['t_dfs']:.2f}  nx={timings['t_networkx']:.2f}")
 
         except DFSBudgetExceeded:
             t_total = time.perf_counter() - t0

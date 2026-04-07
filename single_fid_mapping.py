@@ -4,8 +4,8 @@ from gridstock.dbcleaning import (
     get_mapped_substations_ids_from_summary,
     get_mapped_substations_from_logs
 )
-from gridstock.plotting import plot_net_data
 from gridstock.recorder import NetworkData
+import sqlite3
 
 from multiprocessing import Pool, Queue, Process, cpu_count, Event
 from tqdm import tqdm
@@ -18,26 +18,19 @@ import traceback
 
 
 
-def extract_all_fids(gpkg_file='data/assets.gpkg', layer_name='General Boundary'):
+def extract_all_fids():
     """
-    Extracts a list of all 'fids' from the specified Geopackage file and layer.
-
-    Parameters:
-        gpkg_file (str): The path to the Geopackage file.
-        layer_name (str): The name of the layer containing the 'fids'.
+    Load all substation FIDs from lv_assets.sqlite.
 
     Returns:
-        list: A list containing all 'fids' found in the specified layer.
+        list: A list containing all substation FIDs.
     """
-    all_fids = []
-
-    with fiona.open(gpkg_file, layer=layer_name, crs="osgb36") as src:
-        for feature in src:
-            fid = feature['properties'].get('FID')  # Get the 'fid' value from the properties dictionary
-            if fid is not None:
-                all_fids.append(fid)
-
-    return all_fids
+    conn = sqlite3.connect('data/lv_assets.sqlite', timeout=120)
+    cur = conn.cursor()
+    cur.execute("SELECT fid FROM lv_assets WHERE Is_Substation = 1")
+    fids = [r[0] for r in cur.fetchall()]
+    conn.close()
+    return fids
 
 class LogBatch:
     """Container for all log messages from processing one FID"""
@@ -312,14 +305,7 @@ def main():
     print("Starting GIS mapping process...")
     
     # Extract all FIDs
-    all_fids_list_raw = extract_all_fids()
-
-    # Remove problematic substations - investigate these later!
-    problem_subs = [11375446, 11375106, 11375790, 11375939, 11376031]
-    all_fids_list = [item for item in all_fids_list_raw if item not in problem_subs]
-    
-    if problem_subs:
-        print(f"Excluding {len(problem_subs)} problematic substations: {problem_subs}")
+    all_fids_list = extract_all_fids()
 
     # Check which substations have already been mapped
     print("Checking for previously mapped substations...")
