@@ -1,6 +1,7 @@
 
 # Explicitly ignore typical unwanted folders
 .vscode/
+.claude/worktrees/
 __pycache__/
 venv*/
 data/

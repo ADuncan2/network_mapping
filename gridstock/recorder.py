@@ -7,12 +7,13 @@ to store the data for one distribution network,
 i.e. the mapping of a singgle substation.
 """
 
-import sqlite3
-from shapely import wkb
-from shapely.ops import linemerge
-from shapely.geometry import LineString
 import csv
 import os
+import sqlite3
+
+from shapely import wkb
+from shapely.geometry import LineString
+from shapely.ops import linemerge
 
 
 class NetworkData:
@@ -34,16 +35,16 @@ class NetworkData:
 
     incidence_list : list[list[Any]]
         The incidence list of the network so far. Contains
-        Each element in the list is itself a list with four 
+        Each element in the list is itself a list with four
         entries: the ID of the edge, the IDs of the to and
         from nodes, and the ID of the parent substation.
 
     node_list : list[list[Any]]
-        List whose rows contain a list containing all the 
+        List whose rows contain a list containing all the
         data grabed from assets pertaining to each node.
-    
+
     edge_list : list[list[Any]]
-        List whose rows contain a list containing all the 
+        List whose rows contain a list containing all the
         data grabed from assets pertaining to each edge.
 
     summary_stats : dict[str, Any]
@@ -69,7 +70,7 @@ class NetworkData:
         {len(self.node_list)} nodes, {len(self.edge_list)} edges and {len(self.substation)} substations.
         """
         return msg
-    
+
     def modify_edge(
             self,
             edge_fid: str,
@@ -78,11 +79,11 @@ class NetworkData:
             new_terminus: str
             ) -> None:
         """
-        Function to merge lines that have a 
-        line-line connection with no intermmediate 
+        Function to merge lines that have a
+        line-line connection with no intermmediate
         node into a single line.
         """
-        
+
         # Update line geometry
         for edge_row in self.edge_list:
             if edge_row[0] == edge_fid:
@@ -95,7 +96,7 @@ class NetworkData:
                 else:
                     raise TypeError("Could not merge lines.")
                 break
-        
+
         # Modify incidence
         for row in self.incidence_list:
             if row[0] == edge_fid:
@@ -137,7 +138,10 @@ class NetworkData:
             if self.substation is not None:
                 inc_rows = []
                 for line, node_from, node_to in self.incidence_list:
-                    inc_rows.append((int(line), int(node_from), int(node_to), int(parent_substation)))
+                    inc_rows.append((
+                        int(line), int(node_from),
+                        int(node_to), int(parent_substation)
+                    ))
                 cursor.executemany(
                     "INSERT OR IGNORE INTO incidence_list "
                     "(edge_fid, node_from, node_to, parent_substation) "
@@ -187,9 +191,8 @@ class NetworkData:
         # Check if the CSV already exists
         file_exists = os.path.exists(fname)
 
-        with open(fname, "a", newline="") as f:
+        with open(fname, "a", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=self.summary_stats.keys())
             if not file_exists:
                 writer.writeheader()
             writer.writerow(self.summary_stats)
-

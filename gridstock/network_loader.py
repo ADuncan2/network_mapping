@@ -5,8 +5,9 @@ Used by building_matching.py to reconstruct network topology
 for spatial matching of service points to buildings.
 """
 
-import networkx as nx
 import sqlite3
+
+import networkx as nx
 from shapely.wkb import loads, dumps
 
 
@@ -30,19 +31,28 @@ class MappedNetwork:
         cursor = connection.cursor()
 
         # Get all unique nodes from the incidence list
-        cursor.execute(f"SELECT DISTINCT node_from FROM incidence_list WHERE parent_substation = {fid}")
+        cursor.execute(
+            f"SELECT DISTINCT node_from FROM incidence_list "
+            f"WHERE parent_substation = {fid}"
+        )
         unique_node_from_rows = cursor.fetchall()
-        cursor.execute(f"SELECT DISTINCT node_to FROM incidence_list WHERE parent_substation = {fid}")
+        cursor.execute(
+            f"SELECT DISTINCT node_to FROM incidence_list "
+            f"WHERE parent_substation = {fid}"
+        )
         unique_node_to_rows = cursor.fetchall()
 
-        set_node_from = set([row[0] for row in unique_node_from_rows])
-        set_node_to = set([row[0] for row in unique_node_to_rows])
+        set_node_from = {row[0] for row in unique_node_from_rows}
+        set_node_to = {row[0] for row in unique_node_to_rows}
         nodes = set_node_from.union(set_node_to)
 
         # Get substation data from lv_assets (excluded from graph.sqlite)
         lv_con = sqlite3.connect(r"data\lv_assets.sqlite")
         lv_curs = lv_con.cursor()
-        lv_curs.execute(f"SELECT Geometry, Asset_Type, Voltage, Installation_Date FROM lv_assets WHERE fid = {fid}")
+        lv_curs.execute(
+            f"SELECT Geometry, Asset_Type, Voltage, Installation_Date "
+            f"FROM lv_assets WHERE fid = {fid}"
+        )
         sub_data = lv_curs.fetchone()
         sub_point = loads(sub_data[0]).centroid
         sub_point_wkb = dumps(sub_point)
@@ -50,7 +60,10 @@ class MappedNetwork:
 
         # Add nodes to the NetworkX graph
         for node in nodes:
-            cursor.execute(f"SELECT Geometry, Asset_Type, Voltage, Installation_Date FROM node_list WHERE fid = {node}")
+            cursor.execute(
+                f"SELECT Geometry, Asset_Type, Voltage, Installation_Date "
+                f"FROM node_list WHERE fid = {node}"
+            )
             node_data = cursor.fetchone()
 
             try:
@@ -81,13 +94,19 @@ class MappedNetwork:
         num_nodes_after_node_initialisation = self.net.number_of_nodes()
 
         # Add edges from the incidence list
-        cursor.execute(f"SELECT edge_fid, node_from, node_to FROM incidence_list WHERE parent_substation = {fid}")
+        cursor.execute(
+            f"SELECT edge_fid, node_from, node_to FROM incidence_list "
+            f"WHERE parent_substation = {fid}"
+        )
         incidence_rows = cursor.fetchall()
 
         for row in incidence_rows:
             edge_fid, node_from, node_to = row
 
-            cursor.execute(f"SELECT Geometry, Asset_Type, Voltage, Cable_Size FROM edge_list WHERE fid = {edge_fid}")
+            cursor.execute(
+                f"SELECT Geometry, Asset_Type, Voltage, Cable_Size "
+                f"FROM edge_list WHERE fid = {edge_fid}"
+            )
             edge_data = cursor.fetchone()
 
             geom = loads(edge_data[0])

@@ -12,20 +12,21 @@ Preprocessing pipeline order:
 8. create_graph_db()           — Create empty output database
 """
 
+import os
+import re
 import sqlite3
+import time
+from datetime import datetime
+
 import fiona
+import pandas as pd
+from shapely import wkb, STRtree
+from shapely.affinity import translate, rotate
 from shapely.geometry import (
     shape,
     Polygon,
     Point
 )
-from shapely.affinity import translate, rotate
-from shapely import wkb, STRtree
-import os
-import re
-from datetime import datetime
-import time
-import pandas as pd
 
 LINE_CLEAR = '\x1b[2K'
 
@@ -71,7 +72,7 @@ class PreprocessingReport:
             lines.append("")
 
         report_text = "\n".join(lines)
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             f.write(report_text)
         print(report_text)
         return report_text
@@ -287,7 +288,8 @@ def create_lv_db(report=None) -> None:
                     rating_normal = ""
                 if rating_normal == "None":
                     rating_normal = ""
-                if layer in ("Transformer", "PMT Transformer") and rating_normal in ("", "Not Defined"):
+                if (layer in ("Transformer", "PMT Transformer")
+                        and rating_normal in ("", "Not Defined")):
                     transformer_rating_undefined += 1
 
                 # Variable Rating
@@ -374,7 +376,8 @@ def create_lv_db(report=None) -> None:
         )
         report.add_metric(
             step,
-            f"Transformer rating undefined (of {layer_counts.get('Transformer', 0) + layer_counts.get('PMT Transformer', 0)})",
+            "Transformer rating undefined "
+            f"(of {layer_counts.get('Transformer', 0) + layer_counts.get('PMT Transformer', 0)})",
             transformer_rating_undefined,
         )
         report.end_step(step)
@@ -661,7 +664,8 @@ def simplify_substations(report=None) -> None:
                     edge_fid = thing["properties"]["FID"]
 
                     # Check for lines that cross the substation boundary
-                    if substation_geom.intersects(feat_geom) and not feat_geom.within(substation_geom):
+                    if (substation_geom.intersects(feat_geom)
+                            and not feat_geom.within(substation_geom)):
                         try:
                             flux_count += 1
 
@@ -726,7 +730,10 @@ def simplify_substations(report=None) -> None:
     if report:
         avg_flux = total_flux / max(substations_processed, 1)
         report.add_metric(step, "Substations processed", substations_processed)
-        report.add_metric(step, "Flux lines found", f"{total_flux} total (avg {avg_flux:.1f} per substation)")
+        report.add_metric(
+            step, "Flux lines found",
+            f"{total_flux} total (avg {avg_flux:.1f} per substation)"
+        )
         report.add_metric(step, "Zero-flux substations", f"{len(zero_flux)} {zero_flux[:10]}")
         report.add_metric(step, "No-internal-node cases", no_internal)
         report.end_step(step)
@@ -1064,7 +1071,10 @@ def enrich_substations(report=None) -> None:
     print(f"  Multi-transformer: {multi_tx}")
 
     if report:
-        report.add_metric(step, "Substations with transformer match", f"{matched} / {len(substations)}")
+        report.add_metric(
+            step, "Substations with transformer match",
+            f"{matched} / {len(substations)}"
+        )
         report.add_metric(step, "Unmatched substations", f"{unmatched} {unmatched_fids[:10]}")
         report.add_metric(step, "Multi-transformer substations", multi_tx)
         report.end_step(step)
@@ -1269,7 +1279,7 @@ def get_mapped_substations_ids_from_database() -> set:
         cursor.execute("SELECT * FROM mapped_substations")
         rows = cursor.fetchall()
 
-        result_set = list()
+        result_set = []
         for row in rows:
             result_set.append(row[0])
 

@@ -87,7 +87,7 @@ def setup_logging():
     console_handler = logging.StreamHandler()
     console_formatter = logging.Formatter('%(levelname)s - FID:%(fid)s - %(message)s')
     console_handler.setFormatter(console_formatter)
-    console_handler.setLevel(logging.WARNING)  # Only warnings and errors to console
+    console_handler.setLevel(logging.ERROR)  # Only errors to console (warnings in log file)
     
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)

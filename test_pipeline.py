@@ -8,7 +8,12 @@ import time
 import random
 import sqlite3
 import logging
+import warnings
 from pathlib import Path
+
+# Suppress noisy third-party deprecation/future warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 import pandas as pd
 from tqdm import tqdm
